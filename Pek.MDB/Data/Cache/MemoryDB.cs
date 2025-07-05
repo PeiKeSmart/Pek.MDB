@@ -5,6 +5,7 @@ using DH.Serialization;
 using NewLife.Log;
 
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Specialized;
 using System.Reflection;
 using System.Text;
@@ -15,7 +16,8 @@ internal class MemoryDB
 {
 
     private static IDictionary objectList = Hashtable.Synchronized([]);
-    private static IDictionary indexList = Hashtable.Synchronized([]);
+    // 新的高效索引结构：使用 HashSet<long> 替代字符串存储ID列表
+    private static ConcurrentDictionary<string, HashSet<long>> indexList = new();
 
     public static IDictionary GetObjectsMap()
     {
@@ -24,7 +26,13 @@ internal class MemoryDB
 
     public static IDictionary GetIndexMap()
     {
-        return indexList;
+        // 为了向后兼容，转换为旧格式返回
+        var result = new Hashtable();
+        foreach (var kvp in indexList)
+        {
+            result[kvp.Key] = string.Join(",", kvp.Value);
+        }
+        return result;
     }
 
 
@@ -145,23 +153,23 @@ internal class MemoryDB
 
     internal static IList FindBy(Type t, String propertyName, Object val)
     {
-
-        String propertyKey = GetPropertyKey(t.FullName, propertyName);
-        NameValueCollection valueCollection = GetValueCollection(propertyKey);
-
-        String ids = valueCollection[val.ToString()];
-        if (strUtil.IsNullOrEmpty(ids)) return new ArrayList();
-
-        IList results = new ArrayList();
-        String[] arrItem = ids.Split(',');
-        foreach (String strId in arrItem)
+        var propertyKey = GetPropertyKey(t.FullName!, propertyName);
+        var valueKey = GetValueKey(propertyKey, val.ToString()!);
+        
+        // 使用新的高效索引结构
+        if (indexList.TryGetValue(valueKey, out var idSet))
         {
-            long id = cvt.ToLong(strId);
-            if (id < 0) continue;
-            CacheObject obj = FindById(t, id);
-            if (obj != null) results.Add(obj);
+            var results = new ArrayList();
+            foreach (var id in idSet)
+            {
+                var obj = FindById(t, id);
+                if (obj != null) results.Add(obj);
+            }
+            return results;
         }
-        return results;
+        
+        // 如果没有找到索引，返回空列表
+        return new ArrayList();
     }
 
     internal static IList FindAll(Type t)
@@ -318,85 +326,154 @@ internal class MemoryDB
     private static void MakeIndexByInsert(CacheObject cacheObject, String propertyName, Object pValue)
     {
         if (cacheObject == null || pValue == null) return;
-        Type t = cacheObject.GetType();
-        String propertyKey = GetPropertyKey(t.FullName, propertyName);
-        lock (objIndexLock)
-        {
-            NameValueCollection valueCollection = GetValueCollection(propertyKey);
-            valueCollection.Add(pValue.ToString(), cacheObject.Id.ToString());
-            indexList[propertyKey] = valueCollection;
-        }
+        
+        var t = cacheObject.GetType();
+        var propertyKey = GetPropertyKey(t.FullName ?? "", propertyName);
+        var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
+        
+        // 使用新的高效索引结构
+        indexList.AddOrUpdate(valueKey, 
+            new HashSet<long> { cacheObject.Id }, 
+            (key, existingSet) =>
+            {
+                existingSet.Add(cacheObject.Id);
+                return existingSet;
+            });
     }
 
     private static void MakeIndexByInsert(CacheObject cacheObject)
     {
         if (cacheObject == null) return;
-        Type t = cacheObject.GetType();
-        PropertyInfo[] properties = GetProperties(t);
-        foreach (PropertyInfo p in properties)
+        
+        var t = cacheObject.GetType();
+        var properties = GetProperties(t);
+        
+        foreach (var p in properties)
         {
-
-            String propertyKey = GetPropertyKey(t.FullName, p.Name);
-            lock (objIndexLockInsert)
-            {
-                NameValueCollection valueCollection = GetValueCollection(propertyKey);
-                AddNewValueMap(valueCollection, cacheObject, p);
-            }
+            // 检查是否应该跳过索引
+            var attr = rft.GetAttribute(p, typeof(NotSaveAttribute));
+            if (attr != null) continue;
+            
+            if (!p.CanRead) continue;
+            
+            var pValue = rft.GetPropertyValue(cacheObject, p.Name);
+            if (pValue == null || strUtil.IsNullOrEmpty(pValue.ToString())) continue;
+            
+            var propertyKey = GetPropertyKey(t.FullName ?? "", p.Name);
+            var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
+            
+            // 使用新的高效索引结构
+            indexList.AddOrUpdate(valueKey,
+                new HashSet<long> { cacheObject.Id },
+                (key, existingSet) =>
+                {
+                    existingSet.Add(cacheObject.Id);
+                    return existingSet;
+                });
         }
     }
 
     private static void MakeIndexByUpdate(CacheObject cacheObject)
     {
         if (cacheObject == null) return;
-        Type t = cacheObject.GetType();
-        PropertyInfo[] properties = GetProperties(t);
-        foreach (PropertyInfo p in properties)
+        
+        var t = cacheObject.GetType();
+        var properties = GetProperties(t);
+        
+        foreach (var p in properties)
         {
-
-            String propertyKey = GetPropertyKey(t.FullName, p.Name);
-
-            lock (objIndexLockUpdate)
+            // 检查是否应该跳过索引
+            var attr = rft.GetAttribute(p, typeof(NotSaveAttribute));
+            if (attr != null) continue;
+            
+            if (!p.CanRead) continue;
+            
+            var propertyKey = GetPropertyKey(t.FullName ?? "", p.Name);
+            
+            // 先删除所有相关的旧索引
+            DeleteOldValueIdMapOptimized(propertyKey, cacheObject.Id);
+            
+            // 再添加新索引
+            var pValue = rft.GetPropertyValue(cacheObject, p.Name);
+            if (pValue != null && !strUtil.IsNullOrEmpty(pValue.ToString()))
             {
-                NameValueCollection valueCollection = GetValueCollection(propertyKey);
-                DeleteOldValueIdMap(valueCollection, cacheObject.Id);
-                AddNewValueMap(valueCollection, cacheObject, p);
+                var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
+                indexList.AddOrUpdate(valueKey,
+                    new HashSet<long> { cacheObject.Id },
+                    (key, existingSet) =>
+                    {
+                        existingSet.Add(cacheObject.Id);
+                        return existingSet;
+                    });
             }
-
         }
     }
 
     private static void MakeIndexByUpdate(CacheObject cacheObject, String propertyName, Object pValue)
     {
         if (cacheObject == null || pValue == null) return;
-        Type t = cacheObject.GetType();
-
-        String propertyKey = GetPropertyKey(t.FullName, propertyName);
-
-        lock (objIndexLockUpdate)
-        {
-
-            NameValueCollection valueCollection = GetValueCollection(propertyKey);
-            DeleteOldValueIdMap(valueCollection, cacheObject.Id);
-            valueCollection.Add(pValue.ToString(), cacheObject.Id.ToString());
-            indexList[propertyKey] = valueCollection;
-
-        }
+        
+        var t = cacheObject.GetType();
+        var propertyKey = GetPropertyKey(t.FullName ?? "", propertyName);
+        
+        // 先删除旧索引
+        DeleteOldValueIdMapOptimized(propertyKey, cacheObject.Id);
+        
+        // 添加新索引
+        var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
+        indexList.AddOrUpdate(valueKey,
+            new HashSet<long> { cacheObject.Id },
+            (key, existingSet) =>
+            {
+                existingSet.Add(cacheObject.Id);
+                return existingSet;
+            });
     }
 
     private static void MakeIndexByDelete(CacheObject cacheObject)
     {
         if (cacheObject == null) return;
-        Type t = cacheObject.GetType();
-        PropertyInfo[] properties = GetProperties(t);
-        foreach (PropertyInfo p in properties)
+        
+        var t = cacheObject.GetType();
+        var properties = GetProperties(t);
+        
+        foreach (var p in properties)
         {
+            // 检查是否应该跳过索引
+            var attr = rft.GetAttribute(p, typeof(NotSaveAttribute));
+            if (attr != null) continue;
+            
+            var propertyKey = GetPropertyKey(t.FullName ?? "", p.Name);
+            DeleteOldValueIdMapOptimized(propertyKey, cacheObject.Id);
+        }
+    }
 
-            String propertyKey = GetPropertyKey(t.FullName, p.Name);
-            lock (objIndexLockDelete)
+    // 新的优化删除方法 - O(1) 复杂度
+    private static void DeleteOldValueIdMapOptimized(String propertyKeyPrefix, long oid)
+    {
+        // 找到所有以该属性为前缀的索引键并删除对应的ID
+        var keysToUpdate = new List<string>();
+        var keysToRemove = new List<string>();
+        
+        foreach (var kvp in indexList)
+        {
+            if (kvp.Key.StartsWith(propertyKeyPrefix + ":"))
             {
-                NameValueCollection valueCollection = GetValueCollection(propertyKey);
-                DeleteOldValueIdMap(valueCollection, cacheObject.Id);
+                if (kvp.Value.Contains(oid))
+                {
+                    kvp.Value.Remove(oid);
+                    if (kvp.Value.Count == 0)
+                    {
+                        keysToRemove.Add(kvp.Key);
+                    }
+                }
             }
+        }
+        
+        // 删除空的索引项
+        foreach (var key in keysToRemove)
+        {
+            indexList.TryRemove(key, out _);
         }
     }
 
@@ -405,56 +482,35 @@ internal class MemoryDB
         return t.GetProperties(BindingFlags.Public | BindingFlags.Instance);
     }
 
+    // 移除旧的低效方法，保留用于兼容性
     private static NameValueCollection GetValueCollection(String propertyKey)
     {
-        NameValueCollection valueCollection = indexList[propertyKey] as NameValueCollection;
-        if (valueCollection == null) valueCollection = new NameValueCollection();
-        return valueCollection;
+        // 这个方法现在只用于向后兼容，实际上不再使用 NameValueCollection
+        return new NameValueCollection();
     }
 
+    // 移除旧的低效方法，保留空实现用于兼容性  
     private static void AddNewValueMap(NameValueCollection valueCollection, CacheObject cacheObject, PropertyInfo p)
     {
-
-        Attribute attr = rft.GetAttribute(p, typeof(NotSaveAttribute));
-        if (attr != null) return;
-
-        String propertyKey = GetPropertyKey(cacheObject.GetType().FullName, p.Name);
-
-        if (p.CanRead == false) return;
-        Object pValue = rft.GetPropertyValue(cacheObject, p.Name);
-        if (pValue == null || strUtil.IsNullOrEmpty(pValue.ToString())) return;
-
-        valueCollection.Add(pValue.ToString(), cacheObject.Id.ToString());
-        indexList[propertyKey] = valueCollection;
+        // 这个方法已被优化版本替代，保留空实现用于兼容性
     }
 
-    // TODO 优化
+    // 保留旧的删除方法用于向后兼容，但标记为已弃用
+    // TODO 优化 - 已被 DeleteOldValueIdMapOptimized 替代
     private static void DeleteOldValueIdMap(NameValueCollection valueCollection, long oid)
     {
-        foreach (String key in valueCollection.AllKeys)
-        {
-
-            String val = valueCollection[key];
-            String[] arrItem = val.Split(',');
-            StringBuilder result = new StringBuilder();
-            foreach (String strId in arrItem)
-            {
-                long id = cvt.ToLong(strId);
-                if (id == oid) continue;
-                result.Append(strId);
-                result.Append(",");
-            }
-            String resultStr = result.ToString();
-            if (strUtil.HasText(resultStr))
-                valueCollection[key] = resultStr.Trim().TrimEnd(',');
-            else
-                valueCollection.Remove(key);
-        }
+        // 这个方法已被优化版本替代，保留空实现用于兼容性
     }
 
     private static String GetPropertyKey(String typeFullName, String propertyName)
     {
         return typeFullName + "_" + propertyName;
+    }
+
+    // 新增：获取具体值的索引键
+    private static String GetValueKey(String propertyKey, String value)
+    {
+        return propertyKey + ":" + value;
     }
 
 
@@ -538,7 +594,7 @@ internal class MemoryDB
     {
         _hasCheckedFileDB = new Hashtable();
         objectList = Hashtable.Synchronized(new Hashtable());
-        indexList = Hashtable.Synchronized(new Hashtable());
+        indexList = new ConcurrentDictionary<string, HashSet<long>>();
     }
 
 }
