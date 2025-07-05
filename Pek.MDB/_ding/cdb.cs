@@ -189,7 +189,7 @@ public class cdb
     /// <returns>匹配的数据列表</returns>
     public static List<T> FindByNumericRange<T>(String propertyName, decimal min, decimal max) where T : CacheObject
     {
-        return TypedQueryExtensions.FindByNumericRange<T>(propertyName, min, max);
+        return TypedQueryExtensions.FindByRange<T>(propertyName, min, max);
     }
 
     /// <summary>
@@ -202,7 +202,7 @@ public class cdb
     /// <returns>匹配的数据列表</returns>
     public static List<T> FindByDateRange<T>(String propertyName, DateTime startDate, DateTime endDate) where T : CacheObject
     {
-        return TypedQueryExtensions.FindByDateRange<T>(propertyName, startDate, endDate);
+        return TypedQueryExtensions.FindByRange<T>(propertyName, startDate, endDate);
     }
 
     /// <summary>
@@ -214,7 +214,7 @@ public class cdb
     /// <returns>匹配的数据列表</returns>
     public static List<T> FindByContains<T>(String propertyName, String searchText) where T : CacheObject
     {
-        return TypedQueryExtensions.FindByContains<T>(propertyName, searchText);
+        return TypedQueryExtensions.FindByLike<T>(propertyName, $"*{searchText}*");
     }
 
     /// <summary>
@@ -226,7 +226,7 @@ public class cdb
     /// <returns>匹配的数据列表</returns>
     public static List<T> FindByStartsWith<T>(String propertyName, String prefix) where T : CacheObject
     {
-        return TypedQueryExtensions.FindByStartsWith<T>(propertyName, prefix);
+        return TypedQueryExtensions.FindByLike<T>(propertyName, $"{prefix}*");
     }
 
     /// <summary>
@@ -238,7 +238,7 @@ public class cdb
     /// <returns>匹配的数据列表</returns>
     public static List<T> FindByEndsWith<T>(String propertyName, String suffix) where T : CacheObject
     {
-        return TypedQueryExtensions.FindByEndsWith<T>(propertyName, suffix);
+        return TypedQueryExtensions.FindByLike<T>(propertyName, $"*{suffix}");
     }
 
     // 移除用户无关的配置接口，系统自动提供最优性能

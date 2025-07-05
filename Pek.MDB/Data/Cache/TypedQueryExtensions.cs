@@ -180,68 +180,6 @@ public static class TypedQueryExtensions
             TotalPages = (int)Math.Ceiling((double)totalCount / pageSize)
         };
     }
-
-    /// <summary>
-    /// 数值范围查询的便捷方法
-    /// </summary>
-    /// <typeparam name="T">数据类型</typeparam>
-    /// <param name="propertyName">数值属性名称</param>
-    /// <param name="min">最小值</param>
-    /// <param name="max">最大值</param>
-    /// <returns>匹配的数据列表</returns>
-    public static List<T> FindByNumericRange<T>(string propertyName, decimal min, decimal max) where T : CacheObject
-    {
-        return FindByRange<T>(propertyName, min, max);
-    }
-
-    /// <summary>
-    /// 日期范围查询的便捷方法
-    /// </summary>
-    /// <typeparam name="T">数据类型</typeparam>
-    /// <param name="propertyName">日期属性名称</param>
-    /// <param name="startDate">开始日期</param>
-    /// <param name="endDate">结束日期</param>
-    /// <returns>匹配的数据列表</returns>
-    public static List<T> FindByDateRange<T>(string propertyName, DateTime startDate, DateTime endDate) where T : CacheObject
-    {
-        return FindByRange<T>(propertyName, startDate, endDate);
-    }
-
-    /// <summary>
-    /// 字符串包含查询的便捷方法
-    /// </summary>
-    /// <typeparam name="T">数据类型</typeparam>
-    /// <param name="propertyName">字符串属性名称</param>
-    /// <param name="searchText">搜索文本</param>
-    /// <returns>匹配的数据列表</returns>
-    public static List<T> FindByContains<T>(string propertyName, string searchText) where T : CacheObject
-    {
-        return FindByLike<T>(propertyName, $"*{searchText}*");
-    }
-
-    /// <summary>
-    /// 字符串开头匹配查询的便捷方法
-    /// </summary>
-    /// <typeparam name="T">数据类型</typeparam>
-    /// <param name="propertyName">字符串属性名称</param>
-    /// <param name="prefix">前缀</param>
-    /// <returns>匹配的数据列表</returns>
-    public static List<T> FindByStartsWith<T>(string propertyName, string prefix) where T : CacheObject
-    {
-        return FindByLike<T>(propertyName, $"{prefix}*");
-    }
-
-    /// <summary>
-    /// 字符串结尾匹配查询的便捷方法
-    /// </summary>
-    /// <typeparam name="T">数据类型</typeparam>
-    /// <param name="propertyName">字符串属性名称</param>
-    /// <param name="suffix">后缀</param>
-    /// <returns>匹配的数据列表</returns>
-    public static List<T> FindByEndsWith<T>(string propertyName, string suffix) where T : CacheObject
-    {
-        return FindByLike<T>(propertyName, $"*{suffix}");
-    }
 }
 
 /// <summary>

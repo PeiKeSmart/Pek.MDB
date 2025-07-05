@@ -275,8 +275,18 @@ internal class MemoryDB
     {
         var results = new List<object>();
 
-        // 简化的策略：直接使用统一索引管理器
-        var idSet = UnifiedIndexManager.FindIds(t, propertyName, val);
+        // 简化：直接使用类型感知索引
+        HashSet<long> idSet;
+        if (_enableTypedIndex)
+        {
+            idSet = TypedIndexManager.FindByValue(t, propertyName, val);
+        }
+        else
+        {
+            // 回退到传统索引
+            idSet = FindLegacyIds(t, propertyName, val);
+        }
+        
         foreach (var id in idSet)
         {
             var obj = FindById(t, id);
@@ -770,7 +780,7 @@ internal class MemoryDB
     }
 
     /// <summary>
-    /// 获取索引锁对象（供UnifiedIndexManager使用）
+    /// 获取索引锁对象
     /// </summary>
     /// <returns>索引锁对象</returns>
     public static object GetIndexLock()
@@ -779,7 +789,7 @@ internal class MemoryDB
     }
 
     /// <summary>
-    /// 获取索引列表的快照（供UnifiedIndexManager使用）
+    /// 获取索引列表的快照
     /// </summary>
     /// <returns>索引列表快照</returns>
     public static Dictionary<string, HashSet<long>> GetIndexListSnapshot()
@@ -791,7 +801,7 @@ internal class MemoryDB
     }
 
     /// <summary>
-    /// 直接添加索引项（供UnifiedIndexManager使用）
+    /// 直接添加索引项
     /// </summary>
     /// <param name="key">索引键</param>
     /// <param name="id">对象ID</param>
@@ -802,7 +812,7 @@ internal class MemoryDB
     }
 
     /// <summary>
-    /// 直接移除索引项（供UnifiedIndexManager使用）
+    /// 直接移除索引项
     /// </summary>
     /// <param name="key">索引键</param>
     /// <param name="id">对象ID</param>
@@ -822,7 +832,7 @@ internal class MemoryDB
     }
 
     /// <summary>
-    /// 获取索引项（供UnifiedIndexManager使用）
+    /// 获取索引项
     /// </summary>
     /// <param name="key">索引键</param>
     /// <returns>对象ID集合</returns>
@@ -836,7 +846,7 @@ internal class MemoryDB
     }
 
     /// <summary>
-    /// 获取索引统计信息（供UnifiedIndexManager使用）
+    /// 获取索引统计信息
     /// </summary>
     /// <returns>索引统计信息</returns>
     public static IndexStats GetIndexStats()
@@ -912,7 +922,17 @@ internal class MemoryDB
     /// <returns>分页结果</returns>
     internal static IList FindByPaged(Type t, String propertyName, Object val, int pageIndex, int pageSize)
     {
-        var idSet = UnifiedIndexManager.FindIds(t, propertyName, val);
+        HashSet<long> idSet;
+        if (_enableTypedIndex)
+        {
+            idSet = TypedIndexManager.FindByValue(t, propertyName, val);
+        }
+        else
+        {
+            // 回退到传统索引
+            idSet = FindLegacyIds(t, propertyName, val);
+        }
+        
         var pagedIds = idSet.Skip(pageIndex * pageSize).Take(pageSize);
         
         var results = new ArrayList();
@@ -922,6 +942,19 @@ internal class MemoryDB
             if (obj != null) results.Add(obj);
         }
         return results;
+    }
+
+    /// <summary>
+    /// 传统索引查询方法（从 UnifiedIndexManager 迁移）
+    /// </summary>
+    private static HashSet<long> FindLegacyIds(Type type, string propertyName, object value)
+    {
+        if (value == null) return new HashSet<long>();
+
+        var propertyKey = GetPropertyKey(type.FullName!, propertyName);
+        var valueKey = GetValueKey(propertyKey, value.ToString()!);
+
+        return GetIndexItems(valueKey);
     }
 
 }
