@@ -31,10 +31,10 @@ public static class QueryOptimizer
     }
 
     /// <summary>
-    /// 设置最小查询次数阈值（达到此阈值后才进行优化分析）
+    /// 设置最小查询次数阈值（内部使用，自动优化）
     /// </summary>
     /// <param name="minCount">最小查询次数</param>
-    public static void SetMinQueryCountForOptimization(int minCount)
+    internal static void SetMinQueryCountForOptimization(int minCount)
     {
         _minQueryCountForOptimization = minCount;
     }

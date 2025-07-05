@@ -25,10 +25,10 @@ public static class IncrementalPersistenceManager
     private static volatile bool _enabled = false;
 
     /// <summary>
-    /// 启用增量持久化
+    /// 启用增量持久化（内部使用，自动优化）
     /// </summary>
     /// <param name="config">配置参数</param>
-    public static void EnableIncrementalPersistence(IncrementalPersistenceConfig? config = null)
+    internal static void EnableIncrementalPersistence(IncrementalPersistenceConfig? config = null)
     {
         _config.CopyFrom(config ?? new IncrementalPersistenceConfig());
         _enabled = true;
@@ -43,9 +43,9 @@ public static class IncrementalPersistenceManager
     }
 
     /// <summary>
-    /// 禁用增量持久化
+    /// 禁用增量持久化（内部使用）
     /// </summary>
-    public static void DisableIncrementalPersistence()
+    internal static void DisableIncrementalPersistence()
     {
         _enabled = false;
         _backgroundTimer?.Dispose();

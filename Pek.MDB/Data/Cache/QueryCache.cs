@@ -45,10 +45,10 @@ public static class QueryCache
     internal static bool IsEnabled() => _enabled;
 
     /// <summary>
-    /// 设置缓存策略
+    /// 设置缓存策略（内部使用，自动优化）
     /// </summary>
     /// <param name="policy">缓存策略</param>
-    public static void SetCachePolicy(CachePolicy policy)
+    internal static void SetCachePolicy(CachePolicy policy)
     {
         _policy = policy ?? throw new ArgumentNullException(nameof(policy));
         
