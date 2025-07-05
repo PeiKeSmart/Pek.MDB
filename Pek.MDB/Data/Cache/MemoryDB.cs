@@ -66,18 +66,6 @@ internal class MemoryDB
 
     private static Object objLock = new();
     private static Object chkLock = new();
-    
-    // 异步持久化相关
-    private static readonly ConcurrentDictionary<Type, bool> _pendingPersistence = new();
-    private static readonly Timer _persistenceTimer;
-    private static readonly SemaphoreSlim _persistenceSemaphore = new(1, 1);
-    
-    // 静态构造函数初始化定时器
-    static MemoryDB()
-    {
-        // 每3秒执行一次批量持久化 (3000ms)
-        _persistenceTimer = new Timer(BatchPersistenceCallback, null, 3000, 3000);
-    }
 
 
     private static IList GetObjectsByName(Type t)
@@ -169,7 +157,7 @@ internal class MemoryDB
     }
 
     /// <summary>
-    /// 异步持久化方法（新增）
+    /// 异步持久化方法（立即执行，不延迟）
     /// </summary>
     /// <param name="t">类型</param>
     /// <param name="list">数据列表</param>
@@ -205,62 +193,28 @@ internal class MemoryDB
     }
 
     /// <summary>
-    /// 标记类型需要异步持久化
+    /// 立即启动异步持久化（Fire-and-Forget）
     /// </summary>
     /// <param name="type">类型</param>
-    private static void MarkForAsyncPersistence(Type type)
+    private static void StartAsyncPersistence(Type type)
     {
-        if (!IsInMemory(type))
+        if (IsInMemory(type)) return;
+
+        var list = GetObjectsByName(type);
+        if (list != null)
         {
-            _pendingPersistence.TryAdd(type, true);
+            // Fire-and-Forget: 启动异步持久化但不等待完成
+            _ = Task.Run(async () => {
+                try
+                {
+                    await SerializeAsync(type, list).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    XTrace.WriteException(ex);
+                }
+            });
         }
-    }
-
-    /// <summary>
-    /// 批量持久化回调方法
-    /// </summary>
-    /// <param name="state">状态对象</param>
-    private static void BatchPersistenceCallback(object? state)
-    {
-        _ = Task.Run(async () => {
-            try
-            {
-                await _persistenceSemaphore.WaitAsync().ConfigureAwait(false);
-                
-                // 获取所有待持久化的类型
-                var typesToPersist = _pendingPersistence.Keys.ToList();
-                if (typesToPersist.Count == 0) return;
-
-                // 清空待持久化标记
-                _pendingPersistence.Clear();
-
-                // 并发执行持久化
-                var tasks = typesToPersist.Select(async type => {
-                    try
-                    {
-                        var list = GetObjectsByName(type);
-                        if (list != null)
-                        {
-                            await SerializeAsync(type, list).ConfigureAwait(false);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        XTrace.WriteException(ex);
-                    }
-                }).ToArray();
-
-                await Task.WhenAll(tasks).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                XTrace.WriteException(ex);
-            }
-            finally
-            {
-                _persistenceSemaphore.Release();
-            }
-        });
     }
 
     private static void UpdateObjects(String key, IList list)
@@ -327,10 +281,10 @@ internal class MemoryDB
 
         MakeIndexByInsert(obj);
 
-        // 使用异步持久化替代同步持久化
+        // 使用立即异步持久化
         if (IsInMemory(t)) return;
 
-        MarkForAsyncPersistence(t);
+        StartAsyncPersistence(t);
     }
 
     internal static void InsertByIndex(CacheObject obj, String propertyName, Object pValue)
@@ -350,7 +304,7 @@ internal class MemoryDB
 
         if (IsInMemory(t)) return;
 
-        MarkForAsyncPersistence(t);
+        StartAsyncPersistence(t);
     }
 
     internal static void InsertByIndex(CacheObject obj, Dictionary<String, Object> dic)
@@ -373,7 +327,7 @@ internal class MemoryDB
 
         if (IsInMemory(t)) return;
 
-        MarkForAsyncPersistence(t);
+        StartAsyncPersistence(t);
     }
 
     internal static Result Update(CacheObject obj)
@@ -387,7 +341,7 @@ internal class MemoryDB
 
         try
         {
-            MarkForAsyncPersistence(t);
+            StartAsyncPersistence(t);
             return new Result();
         }
         catch (Exception ex)
@@ -405,12 +359,12 @@ internal class MemoryDB
 
         MakeIndexByUpdate(obj);
 
-        // 使用异步持久化替代同步持久化
+        // 使用立即异步持久化
         if (IsInMemory(t)) return new Result();
 
         try
         {
-            MarkForAsyncPersistence(t);
+            StartAsyncPersistence(t);
             return new Result();
         }
         catch (Exception ex)
@@ -435,10 +389,10 @@ internal class MemoryDB
 
         DeleteIdIndex(_typeFullName, obj.Id);
 
-        // 使用异步持久化替代同步持久化
+        // 使用立即异步持久化
         if (IsInMemory(t)) return;
 
-        MarkForAsyncPersistence(t);
+        StartAsyncPersistence(t);
     }
 
     private static long GetNextId(IList list)
