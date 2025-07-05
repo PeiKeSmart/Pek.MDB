@@ -2,6 +2,7 @@
 using DH.Reflection;
 using DH.Serialization;
 using DH.Data.Cache;
+using DH.Data.Cache.TypedIndex;
 
 using NewLife.Log;
 
@@ -19,6 +20,31 @@ internal class MemoryDB
     private static IDictionary objectList = Hashtable.Synchronized([]);
     // 新的高效索引结构：使用 HashSet<long> 替代字符串存储ID列表
     private static ConcurrentDictionary<string, HashSet<long>> indexList = new();
+    
+    // 类型感知索引配置
+    private static bool _enableTypedIndex = true;
+    private static readonly object _configLock = new();
+
+    /// <summary>
+    /// 启用或禁用类型感知索引
+    /// </summary>
+    /// <param name="enable">是否启用</param>
+    public static void EnableTypedIndex(bool enable)
+    {
+        lock (_configLock)
+        {
+            _enableTypedIndex = enable;
+        }
+    }
+
+    /// <summary>
+    /// 检查是否启用了类型感知索引
+    /// </summary>
+    /// <returns>是否启用</returns>
+    public static bool IsTypedIndexEnabled()
+    {
+        return _enableTypedIndex;
+    }
 
     public static IDictionary GetObjectsMap()
     {
@@ -154,14 +180,31 @@ internal class MemoryDB
 
     internal static IList FindBy(Type t, String propertyName, Object val)
     {
+        // 优先使用类型感知索引（如果启用）
+        if (_enableTypedIndex)
+        {
+            var idSet = TypedIndexManager.FindByValue(t, propertyName, val);
+            if (idSet.Count > 0)
+            {
+                var results = new ArrayList();
+                foreach (var id in idSet)
+                {
+                    var obj = FindById(t, id);
+                    if (obj != null) results.Add(obj);
+                }
+                return results;
+            }
+        }
+        
+        // 降级到传统字符串索引
         var propertyKey = GetPropertyKey(t.FullName!, propertyName);
         var valueKey = GetValueKey(propertyKey, val.ToString()!);
         
         // 使用新的高效索引结构
-        if (indexList.TryGetValue(valueKey, out var idSet))
+        if (indexList.TryGetValue(valueKey, out var idSet2))
         {
             var results = new ArrayList();
-            foreach (var id in idSet)
+            foreach (var id in idSet2)
             {
                 var obj = FindById(t, id);
                 if (obj != null) results.Add(obj);
@@ -353,19 +396,29 @@ internal class MemoryDB
             if (!p.CanRead) continue;
             
             var pValue = rft.GetPropertyValue(cacheObject, p.Name);
-            if (pValue == null || strUtil.IsNullOrEmpty(pValue.ToString())) continue;
+            if (pValue == null) continue;
             
-            var propertyKey = GetPropertyKey(cacheObject.GetType().FullName ?? "", p.Name);
-            var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
+            // 传统字符串索引（保持向后兼容）
+            if (!strUtil.IsNullOrEmpty(pValue.ToString()))
+            {
+                var propertyKey = GetPropertyKey(cacheObject.GetType().FullName ?? "", p.Name);
+                var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
+                
+                // 使用新的高效索引结构
+                indexList.AddOrUpdate(valueKey,
+                    new HashSet<long> { cacheObject.Id },
+                    (key, existingSet) =>
+                    {
+                        existingSet.Add(cacheObject.Id);
+                        return existingSet;
+                    });
+            }
             
-            // 使用新的高效索引结构
-            indexList.AddOrUpdate(valueKey,
-                new HashSet<long> { cacheObject.Id },
-                (key, existingSet) =>
-                {
-                    existingSet.Add(cacheObject.Id);
-                    return existingSet;
-                });
+            // 类型感知索引（新功能）
+            if (_enableTypedIndex)
+            {
+                TypedIndexManager.AddIndex(cacheObject.GetType(), p.Name, p.PropertyType, pValue, cacheObject.Id);
+            }
         }
         
         // 创建对象快照用于后续增量更新
@@ -383,6 +436,7 @@ internal class MemoryDB
         {
             var propertyKey = GetPropertyKey(cacheObject.GetType().FullName ?? "", change.PropertyName);
             
+            // 更新传统字符串索引
             // 删除旧索引
             if (change.OldValue != null && !strUtil.IsNullOrEmpty(change.OldValue.ToString()))
             {
@@ -408,6 +462,27 @@ internal class MemoryDB
                         existingSet.Add(cacheObject.Id);
                         return existingSet;
                     });
+            }
+            
+            // 更新类型感知索引
+            if (_enableTypedIndex)
+            {
+                // 获取属性类型
+                var property = cacheObject.GetType().GetProperty(change.PropertyName);
+                if (property != null)
+                {
+                    // 移除旧值
+                    if (change.OldValue != null)
+                    {
+                        TypedIndexManager.RemoveIndex(cacheObject.GetType(), change.PropertyName, change.OldValue, cacheObject.Id);
+                    }
+                    
+                    // 添加新值
+                    if (change.NewValue != null)
+                    {
+                        TypedIndexManager.AddIndex(cacheObject.GetType(), change.PropertyName, property.PropertyType, change.NewValue, cacheObject.Id);
+                    }
+                }
             }
         }
         
@@ -444,8 +519,19 @@ internal class MemoryDB
         
         foreach (var p in properties)
         {
+            // 删除传统字符串索引
             var propertyKey = GetPropertyKey(cacheObject.GetType().FullName ?? "", p.Name);
             DeleteOldValueIdMapOptimized(propertyKey, cacheObject.Id);
+            
+            // 删除类型感知索引
+            if (_enableTypedIndex && p.CanRead)
+            {
+                var pValue = rft.GetPropertyValue(cacheObject, p.Name);
+                if (pValue != null)
+                {
+                    TypedIndexManager.RemoveIndex(cacheObject.GetType(), p.Name, pValue, cacheObject.Id);
+                }
+            }
         }
         
         // 删除对象快照

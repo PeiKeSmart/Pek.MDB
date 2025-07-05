@@ -119,4 +119,144 @@ public class cdb
         MemoryDB.Delete(obj);
     }
 
+    /// <summary>
+    /// 根据范围查询数据（类型感知）
+    /// </summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="propertyName">属性名称</param>
+    /// <param name="minValue">最小值</param>
+    /// <param name="maxValue">最大值</param>
+    /// <returns>返回数据列表</returns>
+    public static List<T> FindByRange<T>(String propertyName, IComparable minValue, IComparable maxValue) where T : CacheObject
+    {
+        return TypedQueryExtensions.FindByRange<T>(propertyName, minValue, maxValue);
+    }
+
+    /// <summary>
+    /// 根据模式匹配查询数据（支持通配符）
+    /// </summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="propertyName">属性名称</param>
+    /// <param name="pattern">匹配模式（支持*通配符）</param>
+    /// <returns>返回数据列表</returns>
+    public static List<T> FindByLike<T>(String propertyName, String pattern) where T : CacheObject
+    {
+        return TypedQueryExtensions.FindByLike<T>(propertyName, pattern);
+    }
+
+    /// <summary>
+    /// 复合条件查询
+    /// </summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="conditions">查询条件字典</param>
+    /// <returns>返回数据列表</returns>
+    public static List<T> FindByMultiple<T>(Dictionary<String, Object> conditions) where T : CacheObject
+    {
+        return TypedQueryExtensions.FindByMultiple<T>(conditions);
+    }
+
+    /// <summary>
+    /// 批量ID查询
+    /// </summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="ids">ID集合</param>
+    /// <returns>ID到对象的映射</returns>
+    public static Dictionary<long, T> FindByIds<T>(IEnumerable<long> ids) where T : CacheObject
+    {
+        return TypedQueryExtensions.FindByIds<T>(ids);
+    }
+
+    /// <summary>
+    /// 分页查询
+    /// </summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="propertyName">排序属性名称</param>
+    /// <param name="pageIndex">页索引（从0开始）</param>
+    /// <param name="pageSize">页大小</param>
+    /// <param name="ascending">是否升序</param>
+    /// <returns>分页结果</returns>
+    public static PagedResult<T> FindByPage<T>(String? propertyName = null, int pageIndex = 0, int pageSize = 10, bool ascending = true) where T : CacheObject
+    {
+        return TypedQueryExtensions.FindByPage<T>(propertyName, pageIndex, pageSize, ascending);
+    }
+
+    /// <summary>
+    /// 数值范围查询的便捷方法
+    /// </summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="propertyName">数值属性名称</param>
+    /// <param name="min">最小值</param>
+    /// <param name="max">最大值</param>
+    /// <returns>匹配的数据列表</returns>
+    public static List<T> FindByNumericRange<T>(String propertyName, decimal min, decimal max) where T : CacheObject
+    {
+        return TypedQueryExtensions.FindByNumericRange<T>(propertyName, min, max);
+    }
+
+    /// <summary>
+    /// 日期范围查询的便捷方法
+    /// </summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="propertyName">日期属性名称</param>
+    /// <param name="startDate">开始日期</param>
+    /// <param name="endDate">结束日期</param>
+    /// <returns>匹配的数据列表</returns>
+    public static List<T> FindByDateRange<T>(String propertyName, DateTime startDate, DateTime endDate) where T : CacheObject
+    {
+        return TypedQueryExtensions.FindByDateRange<T>(propertyName, startDate, endDate);
+    }
+
+    /// <summary>
+    /// 字符串包含查询的便捷方法
+    /// </summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="propertyName">字符串属性名称</param>
+    /// <param name="searchText">搜索文本</param>
+    /// <returns>匹配的数据列表</returns>
+    public static List<T> FindByContains<T>(String propertyName, String searchText) where T : CacheObject
+    {
+        return TypedQueryExtensions.FindByContains<T>(propertyName, searchText);
+    }
+
+    /// <summary>
+    /// 字符串开头匹配查询的便捷方法
+    /// </summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="propertyName">字符串属性名称</param>
+    /// <param name="prefix">前缀</param>
+    /// <returns>匹配的数据列表</returns>
+    public static List<T> FindByStartsWith<T>(String propertyName, String prefix) where T : CacheObject
+    {
+        return TypedQueryExtensions.FindByStartsWith<T>(propertyName, prefix);
+    }
+
+    /// <summary>
+    /// 字符串结尾匹配查询的便捷方法
+    /// </summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="propertyName">字符串属性名称</param>
+    /// <param name="suffix">后缀</param>
+    /// <returns>匹配的数据列表</returns>
+    public static List<T> FindByEndsWith<T>(String propertyName, String suffix) where T : CacheObject
+    {
+        return TypedQueryExtensions.FindByEndsWith<T>(propertyName, suffix);
+    }
+
+    /// <summary>
+    /// 启用或禁用类型感知索引
+    /// </summary>
+    /// <param name="enable">是否启用</param>
+    public static void EnableTypedIndex(bool enable)
+    {
+        MemoryDB.EnableTypedIndex(enable);
+    }
+
+    /// <summary>
+    /// 检查是否启用了类型感知索引
+    /// </summary>
+    /// <returns>是否启用</returns>
+    public static bool IsTypedIndexEnabled()
+    {
+        return MemoryDB.IsTypedIndexEnabled();
+    }
 }

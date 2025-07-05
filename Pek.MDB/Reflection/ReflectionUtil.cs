@@ -53,11 +53,6 @@ public class ReflectionUtil
         return constructor.Invoke(values);
     }
 
-    public static Object GetInstanceFromProgId(String progId)
-    {
-        return rft.GetInstance(Type.GetTypeFromProgID(progId));
-    }
-
     //---------------------------------------------------------------------------------------------------------------
 
     public static Object GetPropertyValue(Object currentObject, String propertyName)
