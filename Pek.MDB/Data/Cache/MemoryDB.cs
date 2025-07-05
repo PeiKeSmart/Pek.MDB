@@ -27,10 +27,10 @@ internal class MemoryDB
     private static readonly object _configLock = new();
 
     /// <summary>
-    /// 启用或禁用类型感知索引
+    /// 启用或禁用类型感知索引（内部管理，自动优化）
     /// </summary>
     /// <param name="enable">是否启用</param>
-    public static void EnableTypedIndex(bool enable)
+    internal static void EnableTypedIndex(bool enable)
     {
         lock (_configLock)
         {
@@ -39,10 +39,10 @@ internal class MemoryDB
     }
 
     /// <summary>
-    /// 检查是否启用了类型感知索引
+    /// 检查是否启用了类型感知索引（内部使用）
     /// </summary>
     /// <returns>是否启用</returns>
-    public static bool IsTypedIndexEnabled()
+    internal static bool IsTypedIndexEnabled()
     {
         return _enableTypedIndex;
     }

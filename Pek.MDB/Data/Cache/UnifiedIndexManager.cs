@@ -6,71 +6,53 @@ using DH.Reflection;
 namespace DH.Data.Cache;
 
 /// <summary>
-/// 统一索引管理器 - 提供向后兼容的渐进式重构
+/// 统一索引管理器 - 自动提供最优索引性能
 /// </summary>
 public static class UnifiedIndexManager
 {
-    // 兼容性模式配置
-    private static volatile bool _legacyMode = true;
-    private static volatile bool _dualMode = false; // 双重索引模式
+    // 自动优化配置 - 默认启用类型感知索引以获得最优性能
+    private static volatile bool _enableTypedIndex = true;
     private static readonly object _configLock = new();
 
     /// <summary>
-    /// 设置索引模式
+    /// 启用或禁用类型感知索引（内部使用，通常保持默认）
     /// </summary>
-    /// <param name="mode">索引模式</param>
-    public static void SetIndexMode(IndexMode mode)
+    /// <param name="enable">是否启用</param>
+    internal static void EnableTypedIndex(bool enable)
     {
         lock (_configLock)
         {
-            switch (mode)
-            {
-                case IndexMode.Legacy:
-                    _legacyMode = true;
-                    _dualMode = false;
-                    break;
-                case IndexMode.Dual:
-                    _legacyMode = true;
-                    _dualMode = true;
-                    break;
-                case IndexMode.Modern:
-                    _legacyMode = false;
-                    _dualMode = false;
-                    break;
-            }
+            _enableTypedIndex = enable;
         }
     }
 
     /// <summary>
-    /// 获取当前索引模式
+    /// 检查是否启用了类型感知索引
     /// </summary>
-    public static IndexMode GetCurrentMode()
+    internal static bool IsTypedIndexEnabled()
     {
-        if (_legacyMode && _dualMode) return IndexMode.Dual;
-        if (_legacyMode) return IndexMode.Legacy;
-        return IndexMode.Modern;
+        return _enableTypedIndex;
     }
 
     /// <summary>
-    /// 统一的添加索引接口（兼容所有模式）
+    /// 统一的添加索引接口（自动选择最优策略）
     /// </summary>
     public static void AddIndex(Type type, string propertyName, object value, long id)
     {
-        if (_legacyMode)
+        // 自动使用最优索引策略
+        if (_enableTypedIndex)
         {
-            // 使用传统字符串索引（确保100%兼容）
-            AddLegacyIndex(type, propertyName, value, id);
-        }
-
-        if (_dualMode || !_legacyMode)
-        {
-            // 使用类型感知索引
+            // 优先使用类型感知索引
             var propertyType = GetPropertyType(type, propertyName);
             if (propertyType != null)
             {
                 TypedIndexManager.AddIndex(type, propertyName, propertyType, value, id);
+                return;
             }
         }
+        
+        // 回退到传统字符串索引（确保兼容性）
+        AddLegacyIndex(type, propertyName, value, id);
     }
 
     /// <summary>
@@ -78,12 +60,10 @@ public static class UnifiedIndexManager
     /// </summary>
     public static HashSet<long> FindIds(Type type, string propertyName, object value)
     {
-        var results = new HashSet<long>();
-        
-        // 查询优化：根据当前模式选择最佳策略
+        // 查询优化：自动选择最佳策略
         var strategy = QueryOptimizer.AnalyzeQuery(type, propertyName, QueryType.Exact, value);
         
-        if (strategy.UseTypedIndex && (_dualMode || !_legacyMode))
+        if (strategy.UseTypedIndex && _enableTypedIndex)
         {
             // 优先使用类型感知索引
             var typedResults = TypedIndexManager.FindByValue(type, propertyName, value);
@@ -93,13 +73,8 @@ public static class UnifiedIndexManager
             }
         }
 
-        if (_legacyMode)
-        {
-            // 回退到传统索引
-            return FindLegacyIds(type, propertyName, value);
-        }
-
-        return results;
+        // 回退到传统索引
+        return FindLegacyIds(type, propertyName, value);
     }
 
     /// <summary>
@@ -130,11 +105,11 @@ public static class UnifiedIndexManager
     }
 
     /// <summary>
-    /// 批量迁移现有索引到新系统
+    /// 批量迁移现有索引到新系统（内部维护功能）
     /// </summary>
-    public static void MigrateLegacyIndexes()
+    internal static void MigrateLegacyIndexes()
     {
-        if (GetCurrentMode() == IndexMode.Legacy) return;
+        if (!_enableTypedIndex) return;
 
         var indexList = MemoryDB.GetIndexListSnapshot();
         var migratedCount = 0;
@@ -171,14 +146,13 @@ public static class UnifiedIndexManager
                     }
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                // 记录迁移失败的索引，但不中断整个过程
-                Console.WriteLine($"Failed to migrate index {kvp.Key}: {ex.Message}");
+                // 静默处理迁移失败的索引，不影响系统稳定性
             }
         }
 
-        Console.WriteLine($"Successfully migrated {migratedCount} legacy indexes to typed indexes");
+        // 静默完成迁移，不输出控制台信息
     }
 
     /// <summary>
@@ -226,83 +200,5 @@ public static class UnifiedIndexManager
     private static string GetValueKey(string propertyKey, string value)
     {
         return $"{propertyKey}_{value}";
-    }
-
-    /// <summary>
-    /// 性能对比分析
-    /// </summary>
-    public static IndexPerformanceReport ComparePerformance(Type type, string propertyName, object value, int iterations = 1000)
-    {
-        var report = new IndexPerformanceReport
-        {
-            Type = type.Name,
-            PropertyName = propertyName,
-            Iterations = iterations
-        };
-
-        // 测试传统索引性能
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        for (var i = 0; i < iterations; i++)
-        {
-            var _ = FindLegacyIds(type, propertyName, value);
-        }
-        sw.Stop();
-        report.LegacyIndexTime = sw.ElapsedMilliseconds;
-
-        // 测试类型感知索引性能
-        sw.Restart();
-        for (var i = 0; i < iterations; i++)
-        {
-            var _ = TypedIndexManager.FindByValue(type, propertyName, value);
-        }
-        sw.Stop();
-        report.TypedIndexTime = sw.ElapsedMilliseconds;
-
-        report.PerformanceGain = report.LegacyIndexTime > 0 
-            ? (double)report.LegacyIndexTime / report.TypedIndexTime 
-            : 0;
-
-        return report;
-    }
-}
-
-/// <summary>
-/// 索引模式枚举
-/// </summary>
-public enum IndexMode
-{
-    /// <summary>
-    /// 传统模式：只使用字符串索引（完全向后兼容）
-    /// </summary>
-    Legacy,
-    
-    /// <summary>
-    /// 双重模式：同时维护两套索引（过渡期使用）
-    /// </summary>
-    Dual,
-    
-    /// <summary>
-    /// 现代模式：只使用类型感知索引（最优性能）
-    /// </summary>
-    Modern
-}
-
-/// <summary>
-/// 索引性能报告
-/// </summary>
-public class IndexPerformanceReport
-{
-    public string Type { get; set; } = string.Empty;
-    public string PropertyName { get; set; } = string.Empty;
-    public int Iterations { get; set; }
-    public long LegacyIndexTime { get; set; }
-    public long TypedIndexTime { get; set; }
-    public double PerformanceGain { get; set; }
-    
-    public string GetSummary()
-    {
-        return $"Type: {Type}.{PropertyName}, Iterations: {Iterations}, " +
-               $"Legacy: {LegacyIndexTime}ms, Typed: {TypedIndexTime}ms, " +
-               $"Gain: {PerformanceGain:F2}x";
     }
 }

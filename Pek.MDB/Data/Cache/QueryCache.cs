@@ -26,10 +26,10 @@ public static class QueryCache
     private static volatile bool _enabled = true;
 
     /// <summary>
-    /// 启用或禁用查询缓存
+    /// 启用或禁用查询缓存（内部管理，自动优化）
     /// </summary>
     /// <param name="enabled">是否启用</param>
-    public static void SetEnabled(bool enabled)
+    internal static void SetEnabled(bool enabled)
     {
         _enabled = enabled;
         if (!enabled)
@@ -39,10 +39,10 @@ public static class QueryCache
     }
 
     /// <summary>
-    /// 检查是否启用查询缓存
+    /// 检查是否启用查询缓存（内部使用）
     /// </summary>
     /// <returns>是否启用</returns>
-    public static bool IsEnabled() => _enabled;
+    internal static bool IsEnabled() => _enabled;
 
     /// <summary>
     /// 设置缓存策略

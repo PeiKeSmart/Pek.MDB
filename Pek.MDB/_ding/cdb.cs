@@ -241,21 +241,7 @@ public class cdb
         return TypedQueryExtensions.FindByEndsWith<T>(propertyName, suffix);
     }
 
-    /// <summary>
-    /// 启用或禁用类型感知索引
-    /// </summary>
-    /// <param name="enable">是否启用</param>
-    public static void EnableTypedIndex(bool enable)
-    {
-        MemoryDB.EnableTypedIndex(enable);
-    }
-
-    /// <summary>
-    /// 检查是否启用了类型感知索引
-    /// </summary>
-    /// <returns>是否启用</returns>
-    public static bool IsTypedIndexEnabled()
-    {
-        return MemoryDB.IsTypedIndexEnabled();
-    }
+    // 移除用户无关的配置接口，系统自动提供最优性能
+    // 原 EnableTypedIndex 和 IsTypedIndexEnabled 方法已移除
+    // 所有索引优化对用户透明，无需手动配置
 }

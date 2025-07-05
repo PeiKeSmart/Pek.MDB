@@ -22,10 +22,10 @@ public static class QueryOptimizer
     private static readonly object _thresholdLock = new object();
 
     /// <summary>
-    /// 启用或禁用查询优化
+    /// 启用或禁用查询优化（内部管理，自动优化）
     /// </summary>
     /// <param name="enable">是否启用</param>
-    public static void EnableOptimization(bool enable)
+    internal static void EnableOptimization(bool enable)
     {
         _enableOptimization = enable;
     }
