@@ -1,6 +1,7 @@
 ﻿using DH.ORM;
 using DH.Reflection;
 using DH.Serialization;
+using DH.Data.Cache;
 
 using NewLife.Log;
 
@@ -345,21 +346,16 @@ internal class MemoryDB
     {
         if (cacheObject == null) return;
         
-        var t = cacheObject.GetType();
-        var properties = GetProperties(t);
+        var properties = IncrementalIndexManager.GetIndexableProperties(cacheObject.GetType());
         
         foreach (var p in properties)
         {
-            // 检查是否应该跳过索引
-            var attr = rft.GetAttribute(p, typeof(NotSaveAttribute));
-            if (attr != null) continue;
-            
             if (!p.CanRead) continue;
             
             var pValue = rft.GetPropertyValue(cacheObject, p.Name);
             if (pValue == null || strUtil.IsNullOrEmpty(pValue.ToString())) continue;
             
-            var propertyKey = GetPropertyKey(t.FullName ?? "", p.Name);
+            var propertyKey = GetPropertyKey(cacheObject.GetType().FullName ?? "", p.Name);
             var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
             
             // 使用新的高效索引结构
@@ -371,34 +367,41 @@ internal class MemoryDB
                     return existingSet;
                 });
         }
+        
+        // 创建对象快照用于后续增量更新
+        IncrementalIndexManager.CreateSnapshot(cacheObject);
     }
 
     private static void MakeIndexByUpdate(CacheObject cacheObject)
     {
         if (cacheObject == null) return;
         
-        var t = cacheObject.GetType();
-        var properties = GetProperties(t);
+        // 获取属性变化列表
+        var changedProperties = IncrementalIndexManager.GetChangedProperties(cacheObject);
         
-        foreach (var p in properties)
+        foreach (var change in changedProperties)
         {
-            // 检查是否应该跳过索引
-            var attr = rft.GetAttribute(p, typeof(NotSaveAttribute));
-            if (attr != null) continue;
+            var propertyKey = GetPropertyKey(cacheObject.GetType().FullName ?? "", change.PropertyName);
             
-            if (!p.CanRead) continue;
-            
-            var propertyKey = GetPropertyKey(t.FullName ?? "", p.Name);
-            
-            // 先删除所有相关的旧索引
-            DeleteOldValueIdMapOptimized(propertyKey, cacheObject.Id);
-            
-            // 再添加新索引
-            var pValue = rft.GetPropertyValue(cacheObject, p.Name);
-            if (pValue != null && !strUtil.IsNullOrEmpty(pValue.ToString()))
+            // 删除旧索引
+            if (change.OldValue != null && !strUtil.IsNullOrEmpty(change.OldValue.ToString()))
             {
-                var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
-                indexList.AddOrUpdate(valueKey,
+                var oldValueKey = GetValueKey(propertyKey, change.OldValue.ToString() ?? "");
+                if (indexList.TryGetValue(oldValueKey, out var oldSet))
+                {
+                    oldSet.Remove(cacheObject.Id);
+                    if (oldSet.Count == 0)
+                    {
+                        indexList.TryRemove(oldValueKey, out _);
+                    }
+                }
+            }
+            
+            // 添加新索引
+            if (change.NewValue != null && !strUtil.IsNullOrEmpty(change.NewValue.ToString()))
+            {
+                var newValueKey = GetValueKey(propertyKey, change.NewValue.ToString() ?? "");
+                indexList.AddOrUpdate(newValueKey,
                     new HashSet<long> { cacheObject.Id },
                     (key, existingSet) =>
                     {
@@ -407,6 +410,9 @@ internal class MemoryDB
                     });
             }
         }
+        
+        // 更新对象快照
+        IncrementalIndexManager.UpdateSnapshot(cacheObject);
     }
 
     private static void MakeIndexByUpdate(CacheObject cacheObject, String propertyName, Object pValue)
@@ -434,18 +440,16 @@ internal class MemoryDB
     {
         if (cacheObject == null) return;
         
-        var t = cacheObject.GetType();
-        var properties = GetProperties(t);
+        var properties = IncrementalIndexManager.GetIndexableProperties(cacheObject.GetType());
         
         foreach (var p in properties)
         {
-            // 检查是否应该跳过索引
-            var attr = rft.GetAttribute(p, typeof(NotSaveAttribute));
-            if (attr != null) continue;
-            
-            var propertyKey = GetPropertyKey(t.FullName ?? "", p.Name);
+            var propertyKey = GetPropertyKey(cacheObject.GetType().FullName ?? "", p.Name);
             DeleteOldValueIdMapOptimized(propertyKey, cacheObject.Id);
         }
+        
+        // 删除对象快照
+        IncrementalIndexManager.RemoveSnapshot(cacheObject.Id);
     }
 
     // 新的优化删除方法 - O(1) 复杂度
@@ -595,6 +599,7 @@ internal class MemoryDB
         _hasCheckedFileDB = new Hashtable();
         objectList = Hashtable.Synchronized(new Hashtable());
         indexList = new ConcurrentDictionary<string, HashSet<long>>();
+        IncrementalIndexManager.ClearSnapshots();
     }
 
 }
