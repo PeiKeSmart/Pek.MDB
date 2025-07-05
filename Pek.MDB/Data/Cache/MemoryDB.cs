@@ -225,7 +225,7 @@ internal class MemoryDB
         _ = Task.Run(async () => {
             try
             {
-                await _persistenceSemaphore.WaitAsync();
+                await _persistenceSemaphore.WaitAsync().ConfigureAwait(false);
                 
                 // 获取所有待持久化的类型
                 var typesToPersist = _pendingPersistence.Keys.ToList();
@@ -241,7 +241,7 @@ internal class MemoryDB
                         var list = GetObjectsByName(type);
                         if (list != null)
                         {
-                            await SerializeAsync(type, list);
+                            await SerializeAsync(type, list).ConfigureAwait(false);
                         }
                     }
                     catch (Exception ex)
@@ -250,7 +250,7 @@ internal class MemoryDB
                     }
                 }).ToArray();
 
-                await Task.WhenAll(tasks);
+                await Task.WhenAll(tasks).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
