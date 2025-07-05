@@ -19,8 +19,62 @@ internal class MemoryDB
 
     private static IDictionary objectList = Hashtable.Synchronized([]);
     // 高效索引结构：使用线程安全的集合
-    private static ConcurrentDictionary<string, HashSet<long>> indexList = new();
+    private static ConcurrentDictionary<string, ConcurrentHashSet<long>> indexList = new();
     private static readonly object indexLock = new();
+    
+    // 类型级别锁 - 提升并发性能
+    private static readonly ConcurrentDictionary<Type, object> _typeLocks = new();
+    
+    // 原子ID生成器 - 避免ID冲突
+    private static readonly ConcurrentDictionary<Type, long> _typeIdCounters = new();
+    
+    // 性能优化：属性反射结果缓存
+    private static readonly ConcurrentDictionary<Type, PropertyInfo[]> _propertyCache = new();
+    
+    // 性能监控
+    private static readonly ConcurrentDictionary<string, long> _operationCounts = new();
+    
+    /// <summary>
+    /// 获取类型的可读属性（带缓存优化）
+    /// </summary>
+    /// <param name="type">类型</param>
+    /// <returns>属性数组</returns>
+    private static PropertyInfo[] GetCachedProperties(Type type)
+    {
+        return _propertyCache.GetOrAdd(type, t => 
+            t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+             .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
+             .ToArray());
+    }
+    
+    /// <summary>
+    /// 记录操作计数（用于性能监控）
+    /// </summary>
+    /// <param name="operation">操作名称</param>
+    private static void RecordOperation(string operation)
+    {
+        _operationCounts.AddOrUpdate(operation, 1, (k, v) => v + 1);
+    }
+    
+    /// <summary>
+    /// 获取类型专用锁，避免不同类型间的锁竞争
+    /// </summary>
+    /// <param name="type">类型</param>
+    /// <returns>类型锁对象</returns>
+    private static object GetTypeLock(Type type)
+    {
+        return _typeLocks.GetOrAdd(type, _ => new object());
+    }
+    
+    /// <summary>
+    /// 原子性生成下一个ID，确保线程安全
+    /// </summary>
+    /// <param name="type">类型</param>
+    /// <returns>新的唯一ID</returns>
+    private static long GetNextIdAtomic(Type type)
+    {
+        return _typeIdCounters.AddOrUpdate(type, 1, (_, current) => current + 1);
+    }
     
     // 类型感知索引配置
     private static bool _enableTypedIndex = true;
@@ -226,7 +280,8 @@ internal class MemoryDB
 
     internal static CacheObject FindById(Type t, long id)
     {
-
+        RecordOperation("FindById");
+        
         IList list = GetObjectsByName(t);
         if (list.Count > 0)
         {
@@ -241,6 +296,8 @@ internal class MemoryDB
 
     internal static IList FindBy(Type t, String propertyName, Object val)
     {
+        RecordOperation("FindBy");
+        
         var results = new List<object>();
 
         // 简化的策略：直接使用统一索引管理器
@@ -267,67 +324,83 @@ internal class MemoryDB
 
     internal static void Insert(CacheObject obj)
     {
-
+        RecordOperation("Insert");
+        
         Type t = obj.GetType();
         String _typeFullName = t.FullName;
 
-        IList list = FindAll(t);
-        obj.Id = GetNextId(list);
+        // 使用类型级别锁，提高并发性能
+        lock (GetTypeLock(t))
+        {
+            IList list = FindAll(t);
+            obj.Id = GetNextIdAtomic(t); // 使用原子ID生成
 
-        int index = list.Add(obj);
+            int index = list.Add(obj);
 
-        AddIdIndex(_typeFullName, obj.Id, index);
-        UpdateObjects(_typeFullName, list);
+            AddIdIndex(_typeFullName, obj.Id, index);
+            UpdateObjects(_typeFullName, list);
 
-        MakeIndexByInsert(obj);
+            MakeIndexByInsert(obj);
+        }
 
-        // 使用立即异步持久化
-        if (IsInMemory(t)) return;
-
-        StartAsyncPersistence(t);
+        // 持久化在锁外异步执行，避免阻塞
+        if (!IsInMemory(t))
+        {
+            StartAsyncPersistence(t);
+        }
     }
 
     internal static void InsertByIndex(CacheObject obj, String propertyName, Object pValue)
     {
-
         Type t = obj.GetType();
         String _typeFullName = t.FullName;
 
-        IList list = FindAll(t);
-        obj.Id = GetNextId(list);
-        int index = list.Add(obj);
+        // 使用类型级别锁，提高并发性能
+        lock (GetTypeLock(t))
+        {
+            IList list = FindAll(t);
+            obj.Id = GetNextIdAtomic(t); // 使用原子ID生成
+            int index = list.Add(obj);
 
-        AddIdIndex(_typeFullName, obj.Id, index);
-        UpdateObjects(_typeFullName, list);
+            AddIdIndex(_typeFullName, obj.Id, index);
+            UpdateObjects(_typeFullName, list);
 
-        MakeIndexByInsert(obj, propertyName, pValue);
+            MakeIndexByInsert(obj, propertyName, pValue);
+        }
 
-        if (IsInMemory(t)) return;
-
-        StartAsyncPersistence(t);
+        // 持久化在锁外异步执行
+        if (!IsInMemory(t))
+        {
+            StartAsyncPersistence(t);
+        }
     }
 
     internal static void InsertByIndex(CacheObject obj, Dictionary<String, Object> dic)
     {
-
         Type t = obj.GetType();
         String _typeFullName = t.FullName;
 
-        IList list = FindAll(t);
-        obj.Id = GetNextId(list);
-        int index = list.Add(obj);
-
-        AddIdIndex(_typeFullName, obj.Id, index);
-        UpdateObjects(_typeFullName, list);
-
-        foreach (KeyValuePair<String, Object> kv in dic)
+        // 使用类型级别锁，提高并发性能
+        lock (GetTypeLock(t))
         {
-            MakeIndexByInsert(obj, kv.Key, kv.Value);
+            IList list = FindAll(t);
+            obj.Id = GetNextIdAtomic(t); // 使用原子ID生成
+            int index = list.Add(obj);
+
+            AddIdIndex(_typeFullName, obj.Id, index);
+            UpdateObjects(_typeFullName, list);
+
+            foreach (KeyValuePair<String, Object> kv in dic)
+            {
+                MakeIndexByInsert(obj, kv.Key, kv.Value);
+            }
         }
 
-        if (IsInMemory(t)) return;
-
-        StartAsyncPersistence(t);
+        // 持久化在锁外异步执行
+        if (!IsInMemory(t))
+        {
+            StartAsyncPersistence(t);
+        }
     }
 
     internal static Result Update(CacheObject obj)
@@ -359,7 +432,7 @@ internal class MemoryDB
 
         MakeIndexByUpdate(obj);
 
-        // 使用立即异步持久化
+        // 使用立即异 asynchronous
         if (IsInMemory(t)) return new Result();
 
         try
@@ -423,27 +496,18 @@ internal class MemoryDB
         var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
         
         // 使用线程安全的索引操作
-        lock (indexLock)
-        {
-            if (indexList.TryGetValue(valueKey, out var existingSet))
-            {
-                existingSet.Add(cacheObject.Id);
-            }
-            else
-            {
-                indexList[valueKey] = new HashSet<long> { cacheObject.Id };
-            }
-        }
+        var hashSet = indexList.GetOrAdd(valueKey, _ => new ConcurrentHashSet<long>());
+        hashSet.Add(cacheObject.Id);
     }
 
     private static void MakeIndexByInsert(CacheObject cacheObject)
     {
         if (cacheObject == null) return;
         
-        // 简化：直接获取所有可读属性
-        var properties = cacheObject.GetType().GetProperties()
-            .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
-            .ToArray();
+        RecordOperation("IndexInsert");
+        
+        // 使用缓存的属性反射结果 - 性能优化
+        var properties = GetCachedProperties(cacheObject.GetType());
         
         foreach (var p in properties)
         {
@@ -457,17 +521,8 @@ internal class MemoryDB
                 var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
                 
                 // 使用线程安全的索引操作
-                lock (indexLock)
-                {
-                    if (indexList.TryGetValue(valueKey, out var existingSet))
-                    {
-                        existingSet.Add(cacheObject.Id);
-                    }
-                    else
-                    {
-                        indexList[valueKey] = new HashSet<long> { cacheObject.Id };
-                    }
-                }
+                var hashSet = indexList.GetOrAdd(valueKey, _ => new ConcurrentHashSet<long>());
+                hashSet.Add(cacheObject.Id);
             }
             
             // 类型感知索引（新功能）
@@ -499,27 +554,18 @@ internal class MemoryDB
         
         // 添加新索引
         var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
-        lock (indexLock)
-        {
-            if (indexList.TryGetValue(valueKey, out var existingSet))
-            {
-                existingSet.Add(cacheObject.Id);
-            }
-            else
-            {
-                indexList[valueKey] = new HashSet<long> { cacheObject.Id };
-            }
-        }
+        var hashSet = indexList.GetOrAdd(valueKey, _ => new ConcurrentHashSet<long>());
+        hashSet.Add(cacheObject.Id);
     }
 
     private static void MakeIndexByDelete(CacheObject cacheObject)
     {
         if (cacheObject == null) return;
         
-        // 简化：直接获取所有可读属性
-        var properties = cacheObject.GetType().GetProperties()
-            .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
-            .ToArray();
+        RecordOperation("IndexDelete");
+        
+        // 使用缓存的属性反射结果 - 性能优化
+        var properties = GetCachedProperties(cacheObject.GetType());
         
         foreach (var p in properties)
         {
@@ -687,7 +733,7 @@ internal class MemoryDB
     {
         _hasCheckedFileDB = new Hashtable();
         objectList = Hashtable.Synchronized(new Hashtable());
-        indexList = new ConcurrentDictionary<string, HashSet<long>>();
+        indexList = new ConcurrentDictionary<string, ConcurrentHashSet<long>>();
         // 简化：不再需要清理快照
     }
 
@@ -776,13 +822,10 @@ internal class MemoryDB
     /// <returns>索引列表快照</returns>
     public static Dictionary<string, HashSet<long>> GetIndexListSnapshot()
     {
-        lock (indexLock)
-        {
-            return new Dictionary<string, HashSet<long>>(indexList.ToDictionary(
-                kvp => kvp.Key,
-                kvp => new HashSet<long>(kvp.Value)
-            ));
-        }
+        return indexList.ToDictionary(
+            kvp => kvp.Key,
+            kvp => kvp.Value.ToHashSet()
+        );
     }
 
     /// <summary>
@@ -792,17 +835,8 @@ internal class MemoryDB
     /// <param name="id">对象ID</param>
     public static void AddIndexItem(string key, long id)
     {
-        lock (indexLock)
-        {
-            if (indexList.TryGetValue(key, out var existingSet))
-            {
-                existingSet.Add(id);
-            }
-            else
-            {
-                indexList[key] = new HashSet<long> { id };
-            }
-        }
+        var hashSet = indexList.GetOrAdd(key, _ => new ConcurrentHashSet<long>());
+        hashSet.Add(id);
     }
 
     /// <summary>
@@ -832,14 +866,11 @@ internal class MemoryDB
     /// <returns>对象ID集合</returns>
     public static HashSet<long> GetIndexItems(string key)
     {
-        lock (indexLock)
+        if (indexList.TryGetValue(key, out var existingSet))
         {
-            if (indexList.TryGetValue(key, out var existingSet))
-            {
-                return new HashSet<long>(existingSet);
-            }
-            return new HashSet<long>();
+            return existingSet.ToHashSet();
         }
+        return new HashSet<long>();
     }
 
     /// <summary>
@@ -867,5 +898,88 @@ internal class MemoryDB
         public int TotalIndexes { get; set; }
         public int TotalEntries { get; set; }
         public long MemoryUsage { get; set; }
+    }
+
+    /// <summary>
+    /// 批量插入对象 - 性能优化
+    /// </summary>
+    /// <param name="objects">要插入的对象集合</param>
+    internal static void InsertBatch(IEnumerable<CacheObject> objects)
+    {
+        if (objects == null) return;
+        
+        RecordOperation("BatchInsert");
+        
+        var groupedByType = objects.GroupBy(obj => obj.GetType());
+        
+        foreach (var typeGroup in groupedByType)
+        {
+            var type = typeGroup.Key;
+            var typeLock = GetTypeLock(type);
+            
+            lock (typeLock)
+            {
+                var list = FindAll(type);
+                var typeFullName = type.FullName;
+                
+                foreach (var obj in typeGroup)
+                {
+                    obj.Id = GetNextIdAtomic(type);
+                    var index = list.Add(obj);
+                    AddIdIndex(typeFullName, obj.Id, index);
+                    MakeIndexByInsert(obj);
+                }
+                
+                UpdateObjects(typeFullName, list);
+            }
+            
+            // 批量持久化
+            if (!IsInMemory(type))
+            {
+                StartAsyncPersistence(type);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 分页查询 - 性能优化
+    /// </summary>
+    /// <param name="t">类型</param>
+    /// <param name="propertyName">属性名</param>
+    /// <param name="val">查询值</param>
+    /// <param name="pageIndex">页索引</param>
+    /// <param name="pageSize">页大小</param>
+    /// <returns>分页结果</returns>
+    internal static IList FindByPaged(Type t, String propertyName, Object val, int pageIndex, int pageSize)
+    {
+        RecordOperation("PagedQuery");
+        
+        var idSet = UnifiedIndexManager.FindIds(t, propertyName, val);
+        var pagedIds = idSet.Skip(pageIndex * pageSize).Take(pageSize);
+        
+        var results = new ArrayList();
+        foreach (var id in pagedIds)
+        {
+            var obj = FindById(t, id);
+            if (obj != null) results.Add(obj);
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// 获取性能统计信息
+    /// </summary>
+    /// <returns>操作统计</returns>
+    public static Dictionary<string, long> GetPerformanceStatistics()
+    {
+        return new Dictionary<string, long>(_operationCounts);
+    }
+
+    /// <summary>
+    /// 重置性能统计
+    /// </summary>
+    public static void ResetPerformanceStatistics()
+    {
+        _operationCounts.Clear();
     }
 }
