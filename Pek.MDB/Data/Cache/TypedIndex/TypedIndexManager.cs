@@ -12,9 +12,6 @@ public static class TypedIndexManager
 {
     // 类型感知索引存储：Type_PropertyName -> ITypedIndex
     private static readonly ConcurrentDictionary<string, ITypedIndex> _typedIndexes = new();
-    
-    // 索引使用统计
-    private static readonly ConcurrentDictionary<string, IndexUsageStats> _usageStats = new();
 
     /// <summary>
     /// 获取或创建类型感知索引
@@ -55,8 +52,6 @@ public static class TypedIndexManager
     {
         var index = GetOrCreateIndex(type, propertyName, propertyType);
         index.AddId(value, objectId);
-        
-        RecordUsage(type, propertyName, IndexOperation.Add);
     }
 
     /// <summary>
@@ -72,7 +67,6 @@ public static class TypedIndexManager
         if (index != null)
         {
             index.RemoveId(value, objectId);
-            RecordUsage(type, propertyName, IndexOperation.Remove);
         }
     }
 
@@ -88,7 +82,6 @@ public static class TypedIndexManager
         var index = GetIndex(type, propertyName);
         if (index != null)
         {
-            RecordUsage(type, propertyName, IndexOperation.Query);
             return index.GetIds(value);
         }
         
@@ -108,7 +101,6 @@ public static class TypedIndexManager
         var index = GetIndex(type, propertyName);
         if (index != null)
         {
-            RecordUsage(type, propertyName, IndexOperation.RangeQuery);
             return index.GetRange(min, max);
         }
         
@@ -127,7 +119,6 @@ public static class TypedIndexManager
         var index = GetIndex(type, propertyName);
         if (index != null)
         {
-            RecordUsage(type, propertyName, IndexOperation.PatternQuery);
             return index.GetByPattern(pattern);
         }
         
@@ -161,7 +152,6 @@ public static class TypedIndexManager
             index.Clear();
         }
         _typedIndexes.Clear();
-        _usageStats.Clear();
     }
 
     /// <summary>
@@ -206,57 +196,12 @@ public static class TypedIndexManager
     }
 
     /// <summary>
-    /// 获取索引使用统计
+    /// 获取索引总数
     /// </summary>
-    /// <returns>使用统计信息</returns>
-    public static Dictionary<string, IndexUsageStats> GetUsageStatistics()
+    /// <returns>索引总数</returns>
+    public static int GetIndexCount()
     {
-        return new Dictionary<string, IndexUsageStats>(_usageStats);
-    }
-
-    /// <summary>
-    /// 推荐索引优化建议
-    /// </summary>
-    /// <returns>优化建议列表</returns>
-    public static List<IndexOptimizationRecommendation> GetOptimizationRecommendations()
-    {
-        var recommendations = new List<IndexOptimizationRecommendation>();
-        
-        foreach (var kvp in _usageStats)
-        {
-            var stats = kvp.Value;
-            var parts = kvp.Key.Split(new char[] { '_' }, 2);
-            if (parts.Length != 2) continue;
-            
-            var recommendation = new IndexOptimizationRecommendation
-            {
-                TypeName = parts[0],
-                PropertyName = parts[1],
-                QueryCount = stats.QueryCount,
-                HitRate = stats.HitCount > 0 ? (double)stats.HitCount / stats.QueryCount : 0
-            };
-            
-            // 分析并给出建议
-            if (stats.QueryCount == 0)
-            {
-                recommendation.Recommendation = "考虑删除未使用的索引以节省内存";
-                recommendation.Priority = RecommendationPriority.Low;
-            }
-            else if (recommendation.HitRate < 0.1)
-            {
-                recommendation.Recommendation = "索引命中率过低，考虑优化查询条件或调整索引策略";
-                recommendation.Priority = RecommendationPriority.Medium;
-            }
-            else if (stats.QueryCount > 1000 && recommendation.HitRate > 0.8)
-            {
-                recommendation.Recommendation = "高频高效索引，表现良好";
-                recommendation.Priority = RecommendationPriority.Info;
-            }
-            
-            recommendations.Add(recommendation);
-        }
-        
-        return recommendations.OrderByDescending(r => r.Priority).ToList();
+        return _typedIndexes.Count;
     }
 
     private static string GetIndexKey(Type type, string propertyName)
@@ -283,79 +228,4 @@ public static class TypedIndexManager
             _ => new GenericIndex()
         };
     }
-
-    private static void RecordUsage(Type type, string propertyName, IndexOperation operation)
-    {
-        var key = GetIndexKey(type, propertyName);
-        _usageStats.AddOrUpdate(key,
-            new IndexUsageStats { QueryCount = operation == IndexOperation.Query ? 1 : 0 },
-            (k, existing) =>
-            {
-                switch (operation)
-                {
-                    case IndexOperation.Query:
-                    case IndexOperation.RangeQuery:
-                    case IndexOperation.PatternQuery:
-                        existing.QueryCount++;
-                        break;
-                    case IndexOperation.Add:
-                        existing.AddCount++;
-                        break;
-                    case IndexOperation.Remove:
-                        existing.RemoveCount++;
-                        break;
-                }
-                existing.LastAccessed = DateTime.Now;
-                return existing;
-            });
-    }
-}
-
-/// <summary>
-/// 索引操作类型
-/// </summary>
-public enum IndexOperation
-{
-    Query,
-    RangeQuery,
-    PatternQuery,
-    Add,
-    Remove
-}
-
-/// <summary>
-/// 索引使用统计
-/// </summary>
-public class IndexUsageStats
-{
-    public int QueryCount { get; set; }
-    public int HitCount { get; set; }
-    public int AddCount { get; set; }
-    public int RemoveCount { get; set; }
-    public DateTime LastAccessed { get; set; } = DateTime.Now;
-}
-
-/// <summary>
-/// 索引优化建议
-/// </summary>
-public class IndexOptimizationRecommendation
-{
-    public string TypeName { get; set; } = "";
-    public string PropertyName { get; set; } = "";
-    public int QueryCount { get; set; }
-    public double HitRate { get; set; }
-    public string Recommendation { get; set; } = "";
-    public RecommendationPriority Priority { get; set; }
-}
-
-/// <summary>
-/// 建议优先级
-/// </summary>
-public enum RecommendationPriority
-{
-    Info = 0,
-    Low = 1,
-    Medium = 2,
-    High = 3,
-    Critical = 4
 }
