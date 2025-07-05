@@ -65,8 +65,19 @@ internal class MemoryDB
 
 
     private static Object objLock = new();
-
     private static Object chkLock = new();
+    
+    // 异步持久化相关
+    private static readonly ConcurrentDictionary<Type, bool> _pendingPersistence = new();
+    private static readonly Timer _persistenceTimer;
+    private static readonly SemaphoreSlim _persistenceSemaphore = new(1, 1);
+    
+    // 静态构造函数初始化定时器
+    static MemoryDB()
+    {
+        // 每3秒执行一次批量持久化 (3000ms)
+        _persistenceTimer = new Timer(BatchPersistenceCallback, null, 3000, 3000);
+    }
 
 
     private static IList GetObjectsByName(Type t)
@@ -157,6 +168,101 @@ internal class MemoryDB
         }
     }
 
+    /// <summary>
+    /// 异步持久化方法（新增）
+    /// </summary>
+    /// <param name="t">类型</param>
+    /// <param name="list">数据列表</param>
+    /// <returns>Task</returns>
+    private static async Task SerializeAsync(Type t, IList list)
+    {
+        try
+        {
+            // 在后台线程执行序列化，避免阻塞主线程
+            var target = await Task.Run(() => SimpleJsonString.ConvertList(list)).ConfigureAwait(false);
+            if (strUtil.IsNullOrEmpty(target)) return;
+
+            var absolutePath = GetCachePath(t);
+            
+            // 异步文件写入
+            await Task.Run(() => {
+                lock (objLock)
+                {
+                    var dir = Path.GetDirectoryName(absolutePath);
+                    if (Directory.Exists(dir) == false)
+                    {
+                        Directory.CreateDirectory(dir);
+                    }
+
+                    DH.IO.File.Write(absolutePath, target);
+                }
+            }).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            XTrace.WriteException(ex);
+        }
+    }
+
+    /// <summary>
+    /// 标记类型需要异步持久化
+    /// </summary>
+    /// <param name="type">类型</param>
+    private static void MarkForAsyncPersistence(Type type)
+    {
+        if (!IsInMemory(type))
+        {
+            _pendingPersistence.TryAdd(type, true);
+        }
+    }
+
+    /// <summary>
+    /// 批量持久化回调方法
+    /// </summary>
+    /// <param name="state">状态对象</param>
+    private static void BatchPersistenceCallback(object? state)
+    {
+        _ = Task.Run(async () => {
+            try
+            {
+                await _persistenceSemaphore.WaitAsync();
+                
+                // 获取所有待持久化的类型
+                var typesToPersist = _pendingPersistence.Keys.ToList();
+                if (typesToPersist.Count == 0) return;
+
+                // 清空待持久化标记
+                _pendingPersistence.Clear();
+
+                // 并发执行持久化
+                var tasks = typesToPersist.Select(async type => {
+                    try
+                    {
+                        var list = GetObjectsByName(type);
+                        if (list != null)
+                        {
+                            await SerializeAsync(type, list);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        XTrace.WriteException(ex);
+                    }
+                }).ToArray();
+
+                await Task.WhenAll(tasks);
+            }
+            catch (Exception ex)
+            {
+                XTrace.WriteException(ex);
+            }
+            finally
+            {
+                _persistenceSemaphore.Release();
+            }
+        });
+    }
+
     private static void UpdateObjects(String key, IList list)
     {
         objectList[key] = list;
@@ -221,10 +327,10 @@ internal class MemoryDB
 
         MakeIndexByInsert(obj);
 
-        // 简化：直接进行持久化，不使用缓存
+        // 使用异步持久化替代同步持久化
         if (IsInMemory(t)) return;
 
-        Serialize(t);
+        MarkForAsyncPersistence(t);
     }
 
     internal static void InsertByIndex(CacheObject obj, String propertyName, Object pValue)
@@ -244,7 +350,7 @@ internal class MemoryDB
 
         if (IsInMemory(t)) return;
 
-        Serialize(t);
+        MarkForAsyncPersistence(t);
     }
 
     internal static void InsertByIndex(CacheObject obj, Dictionary<String, Object> dic)
@@ -267,7 +373,7 @@ internal class MemoryDB
 
         if (IsInMemory(t)) return;
 
-        Serialize(t);
+        MarkForAsyncPersistence(t);
     }
 
     internal static Result Update(CacheObject obj)
@@ -281,7 +387,7 @@ internal class MemoryDB
 
         try
         {
-            Serialize(t);
+            MarkForAsyncPersistence(t);
             return new Result();
         }
         catch (Exception ex)
@@ -299,12 +405,12 @@ internal class MemoryDB
 
         MakeIndexByUpdate(obj);
 
-        // 简化：直接进行持久化，不使用缓存
+        // 使用异步持久化替代同步持久化
         if (IsInMemory(t)) return new Result();
 
         try
         {
-            Serialize(t);
+            MarkForAsyncPersistence(t);
             return new Result();
         }
         catch (Exception ex)
@@ -329,10 +435,10 @@ internal class MemoryDB
 
         DeleteIdIndex(_typeFullName, obj.Id);
 
-        // 简化：直接进行持久化，不使用缓存
+        // 使用异步持久化替代同步持久化
         if (IsInMemory(t)) return;
 
-        Serialize(t, list);
+        MarkForAsyncPersistence(t);
     }
 
     private static long GetNextId(IList list)
