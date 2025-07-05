@@ -28,20 +28,16 @@ internal class MemoryDB
     // 原子ID生成器 - 避免ID冲突
     private static readonly ConcurrentDictionary<Type, long> _typeIdCounters = new();
     
-    // 性能优化：属性反射结果缓存
-    private static readonly ConcurrentDictionary<Type, PropertyInfo[]> _propertyCache = new();
-    
     /// <summary>
-    /// 获取类型的可读属性（带缓存优化）
+    /// 获取类型的可读属性（现代.NET反射性能已足够）
     /// </summary>
     /// <param name="type">类型</param>
     /// <returns>属性数组</returns>
-    private static PropertyInfo[] GetCachedProperties(Type type)
+    private static PropertyInfo[] GetTypeProperties(Type type)
     {
-        return _propertyCache.GetOrAdd(type, t => 
-            t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-             .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
-             .ToArray());
+        return type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                  .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
+                  .ToArray();
     }
     
     /// <summary>
@@ -65,8 +61,7 @@ internal class MemoryDB
     }
     
     // 类型感知索引配置
-    private static bool _enableTypedIndex = true;
-    private static readonly object _configLock = new();
+    private static volatile bool _enableTypedIndex = true;
 
     /// <summary>
     /// 启用或禁用类型感知索引（内部管理，自动优化）
@@ -74,10 +69,7 @@ internal class MemoryDB
     /// <param name="enable">是否启用</param>
     internal static void EnableTypedIndex(bool enable)
     {
-        lock (_configLock)
-        {
-            _enableTypedIndex = enable;
-        }
+        _enableTypedIndex = enable;
     }
 
     /// <summary>
@@ -107,7 +99,6 @@ internal class MemoryDB
 
 
     private static Object objLock = new();
-    private static Object chkLock = new();
 
 
     private static IList GetObjectsByName(Type t)
@@ -116,7 +107,7 @@ internal class MemoryDB
         if (IsCheckFileDB(t))
         {
 
-            lock (chkLock)
+            lock (objLock)
             {
 
                 if (IsCheckFileDB(t))
@@ -181,7 +172,7 @@ internal class MemoryDB
 
     private static void Serialize(Type t, IList list)
     {
-        String target = SimpleJsonString.ConvertList(list);
+        var target = SimpleJsonString.ConvertList(list);
         if (strUtil.IsNullOrEmpty(target)) return;
 
         String absolutePath = GetCachePath(t);
@@ -464,11 +455,6 @@ internal class MemoryDB
 
     //----------------------------------------------------------------------------------------------
 
-    private static Object objIndexLock = new object();
-    private static Object objIndexLockInsert = new object();
-    private static Object objIndexLockUpdate = new object();
-    private static Object objIndexLockDelete = new object();
-
     private static void MakeIndexByInsert(CacheObject cacheObject, String propertyName, Object pValue)
     {
         if (cacheObject == null || pValue == null) return;
@@ -486,8 +472,8 @@ internal class MemoryDB
     {
         if (cacheObject == null) return;
         
-        // 使用缓存的属性反射结果 - 性能优化
-        var properties = GetCachedProperties(cacheObject.GetType());
+        // 使用反射获取属性
+        var properties = GetTypeProperties(cacheObject.GetType());
         
         foreach (var p in properties)
         {
@@ -542,8 +528,8 @@ internal class MemoryDB
     {
         if (cacheObject == null) return;
         
-        // 使用缓存的属性反射结果 - 性能优化
-        var properties = GetCachedProperties(cacheObject.GetType());
+        // 使用反射获取属性
+        var properties = GetTypeProperties(cacheObject.GetType());
         
         foreach (var p in properties)
         {
@@ -702,10 +688,8 @@ internal class MemoryDB
 
     private static String GetCacheFileName(String name)
     {
-        return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, $"Data/{name}{fileExt}");
+        return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, $"Data/{name}.json");
     }
-
-    private static readonly String fileExt = ".json";
 
     internal static void Clear()
     {
