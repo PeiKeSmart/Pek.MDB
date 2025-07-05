@@ -805,4 +805,112 @@ internal class MemoryDB
         }
         return totalMemory;
     }
+
+    /// <summary>
+    /// 获取索引锁对象（供UnifiedIndexManager使用）
+    /// </summary>
+    /// <returns>索引锁对象</returns>
+    public static object GetIndexLock()
+    {
+        return indexLock;
+    }
+
+    /// <summary>
+    /// 获取索引列表的快照（供UnifiedIndexManager使用）
+    /// </summary>
+    /// <returns>索引列表快照</returns>
+    public static Dictionary<string, HashSet<long>> GetIndexListSnapshot()
+    {
+        lock (indexLock)
+        {
+            return new Dictionary<string, HashSet<long>>(indexList.ToDictionary(
+                kvp => kvp.Key,
+                kvp => new HashSet<long>(kvp.Value)
+            ));
+        }
+    }
+
+    /// <summary>
+    /// 直接添加索引项（供UnifiedIndexManager使用）
+    /// </summary>
+    /// <param name="key">索引键</param>
+    /// <param name="id">对象ID</param>
+    public static void AddIndexItem(string key, long id)
+    {
+        lock (indexLock)
+        {
+            if (indexList.TryGetValue(key, out var existingSet))
+            {
+                existingSet.Add(id);
+            }
+            else
+            {
+                indexList[key] = new HashSet<long> { id };
+            }
+        }
+    }
+
+    /// <summary>
+    /// 直接移除索引项（供UnifiedIndexManager使用）
+    /// </summary>
+    /// <param name="key">索引键</param>
+    /// <param name="id">对象ID</param>
+    public static void RemoveIndexItem(string key, long id)
+    {
+        lock (indexLock)
+        {
+            if (indexList.TryGetValue(key, out var existingSet))
+            {
+                existingSet.Remove(id);
+                if (existingSet.Count == 0)
+                {
+                    indexList.TryRemove(key, out _);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 获取索引项（供UnifiedIndexManager使用）
+    /// </summary>
+    /// <param name="key">索引键</param>
+    /// <returns>对象ID集合</returns>
+    public static HashSet<long> GetIndexItems(string key)
+    {
+        lock (indexLock)
+        {
+            if (indexList.TryGetValue(key, out var existingSet))
+            {
+                return new HashSet<long>(existingSet);
+            }
+            return new HashSet<long>();
+        }
+    }
+
+    /// <summary>
+    /// 获取索引统计信息（供UnifiedIndexManager使用）
+    /// </summary>
+    /// <returns>索引统计信息</returns>
+    public static IndexStats GetIndexStats()
+    {
+        lock (indexLock)
+        {
+            return new IndexStats
+            {
+                TotalIndexes = indexList.Count,
+                TotalEntries = indexList.Values.Sum(set => set.Count),
+                MemoryUsage = GetIndexMemoryUsage()
+            };
+        }
+    }
+
+    /// <summary>
+    /// 索引统计信息
+    /// </summary>
+    public class IndexStats
+    {
+        public int TotalIndexes { get; set; }
+        public int TotalEntries { get; set; }
+        public long MemoryUsage { get; set; }
+    }
 }
