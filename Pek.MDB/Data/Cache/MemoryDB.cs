@@ -31,9 +31,6 @@ internal class MemoryDB
     // 性能优化：属性反射结果缓存
     private static readonly ConcurrentDictionary<Type, PropertyInfo[]> _propertyCache = new();
     
-    // 性能监控
-    private static readonly ConcurrentDictionary<string, long> _operationCounts = new();
-    
     /// <summary>
     /// 获取类型的可读属性（带缓存优化）
     /// </summary>
@@ -45,15 +42,6 @@ internal class MemoryDB
             t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
              .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
              .ToArray());
-    }
-    
-    /// <summary>
-    /// 记录操作计数（用于性能监控）
-    /// </summary>
-    /// <param name="operation">操作名称</param>
-    private static void RecordOperation(string operation)
-    {
-        _operationCounts.AddOrUpdate(operation, 1, (k, v) => v + 1);
     }
     
     /// <summary>
@@ -280,8 +268,6 @@ internal class MemoryDB
 
     internal static CacheObject FindById(Type t, long id)
     {
-        RecordOperation("FindById");
-        
         IList list = GetObjectsByName(t);
         if (list.Count > 0)
         {
@@ -296,8 +282,6 @@ internal class MemoryDB
 
     internal static IList FindBy(Type t, String propertyName, Object val)
     {
-        RecordOperation("FindBy");
-        
         var results = new List<object>();
 
         // 简化的策略：直接使用统一索引管理器
@@ -324,8 +308,6 @@ internal class MemoryDB
 
     internal static void Insert(CacheObject obj)
     {
-        RecordOperation("Insert");
-        
         Type t = obj.GetType();
         String _typeFullName = t.FullName;
 
@@ -504,8 +486,6 @@ internal class MemoryDB
     {
         if (cacheObject == null) return;
         
-        RecordOperation("IndexInsert");
-        
         // 使用缓存的属性反射结果 - 性能优化
         var properties = GetCachedProperties(cacheObject.GetType());
         
@@ -561,8 +541,6 @@ internal class MemoryDB
     private static void MakeIndexByDelete(CacheObject cacheObject)
     {
         if (cacheObject == null) return;
-        
-        RecordOperation("IndexDelete");
         
         // 使用缓存的属性反射结果 - 性能优化
         var properties = GetCachedProperties(cacheObject.GetType());
@@ -908,8 +886,6 @@ internal class MemoryDB
     {
         if (objects == null) return;
         
-        RecordOperation("BatchInsert");
-        
         var groupedByType = objects.GroupBy(obj => obj.GetType());
         
         foreach (var typeGroup in groupedByType)
@@ -952,8 +928,6 @@ internal class MemoryDB
     /// <returns>分页结果</returns>
     internal static IList FindByPaged(Type t, String propertyName, Object val, int pageIndex, int pageSize)
     {
-        RecordOperation("PagedQuery");
-        
         var idSet = UnifiedIndexManager.FindIds(t, propertyName, val);
         var pagedIds = idSet.Skip(pageIndex * pageSize).Take(pageSize);
         
@@ -966,20 +940,4 @@ internal class MemoryDB
         return results;
     }
 
-    /// <summary>
-    /// 获取性能统计信息
-    /// </summary>
-    /// <returns>操作统计</returns>
-    public static Dictionary<string, long> GetPerformanceStatistics()
-    {
-        return new Dictionary<string, long>(_operationCounts);
-    }
-
-    /// <summary>
-    /// 重置性能统计
-    /// </summary>
-    public static void ResetPerformanceStatistics()
-    {
-        _operationCounts.Clear();
-    }
 }
