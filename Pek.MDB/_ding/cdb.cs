@@ -67,8 +67,7 @@ public class cdb
     /// <returns>返回数据列表</returns>
     public static List<T> FindBy<T>(String propertyName, Object val) where T : CacheObject
     {
-        FindAll<T>();
-        IList list = MemoryDB.FindBy(typeof(T), propertyName, val);
+        var list = MemoryDB.FindBy(typeof(T), propertyName, val);
         return db.getResults<T>(list);
     }
 

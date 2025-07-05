@@ -18,8 +18,9 @@ internal class MemoryDB
 {
 
     private static IDictionary objectList = Hashtable.Synchronized([]);
-    // 新的高效索引结构：使用 HashSet<long> 替代字符串存储ID列表
+    // 高效索引结构：使用线程安全的集合
     private static ConcurrentDictionary<string, HashSet<long>> indexList = new();
+    private static readonly object indexLock = new();
     
     // 类型感知索引配置
     private static bool _enableTypedIndex = true;
@@ -180,40 +181,60 @@ internal class MemoryDB
 
     internal static IList FindBy(Type t, String propertyName, Object val)
     {
-        // 优先使用类型感知索引（如果启用）
-        if (_enableTypedIndex)
+        // 使用查询缓存（如果启用）
+        var cacheKey = $"{t.FullName}_{propertyName}_{val}";
+        
+        var cachedResults = QueryCache.GetCachedResult(cacheKey, () =>
         {
-            var idSet = TypedIndexManager.FindByValue(t, propertyName, val);
-            if (idSet.Count > 0)
+            var startTime = DateTime.Now;
+            var results = new List<object>();
+            bool usedTypedIndex = false;
+
+            // 使用查询优化器分析最佳策略
+            var strategy = QueryOptimizer.AnalyzeQuery(t, propertyName, QueryType.Exact, val);
+
+            if (strategy.UseTypedIndex && _enableTypedIndex)
             {
-                var results = new ArrayList();
+                // 使用类型感知索引
+                var idSet = TypedIndexManager.FindByValue(t, propertyName, val);
                 foreach (var id in idSet)
                 {
                     var obj = FindById(t, id);
                     if (obj != null) results.Add(obj);
                 }
-                return results;
+                usedTypedIndex = true;
             }
-        }
-        
-        // 降级到传统字符串索引
-        var propertyKey = GetPropertyKey(t.FullName!, propertyName);
-        var valueKey = GetValueKey(propertyKey, val.ToString()!);
-        
-        // 使用新的高效索引结构
-        if (indexList.TryGetValue(valueKey, out var idSet2))
-        {
-            var results = new ArrayList();
-            foreach (var id in idSet2)
+            else
             {
-                var obj = FindById(t, id);
-                if (obj != null) results.Add(obj);
+                // 使用传统字符串索引
+                var propertyKey = GetPropertyKey(t.FullName!, propertyName);
+                var valueKey = GetValueKey(propertyKey, val.ToString()!);
+                
+                if (indexList.TryGetValue(valueKey, out var idSet2))
+                {
+                    foreach (var id in idSet2)
+                    {
+                        var obj = FindById(t, id);
+                        if (obj != null) results.Add(obj);
+                    }
+                }
             }
+
+            // 记录查询性能数据
+            var executionTime = (DateTime.Now - startTime).TotalMilliseconds;
+            QueryOptimizer.RecordQueryResult(t, propertyName, QueryType.Exact, 
+                usedTypedIndex, executionTime, results.Count);
+
             return results;
+        });
+
+        // 转换回 ArrayList 以保持兼容性
+        var arrayList = new ArrayList();
+        foreach (var item in cachedResults)
+        {
+            arrayList.Add(item);
         }
-        
-        // 如果没有找到索引，返回空列表
-        return new ArrayList();
+        return arrayList;
     }
 
     internal static IList FindAll(Type t)
@@ -236,6 +257,9 @@ internal class MemoryDB
         UpdateObjects(_typeFullName, list);
 
         MakeIndexByInsert(obj);
+
+        // 使缓存失效
+        QueryCache.InvalidateCache(t);
 
         if (IsInMemory(t)) return;
 
@@ -314,6 +338,9 @@ internal class MemoryDB
 
         MakeIndexByUpdate(obj);
 
+        // 使缓存失效
+        QueryCache.InvalidateCache(t);
+
         if (IsInMemory(t)) return new Result();
 
         try
@@ -342,6 +369,9 @@ internal class MemoryDB
         UpdateObjects(_typeFullName, list);
 
         DeleteIdIndex(_typeFullName, obj.Id);
+
+        // 使缓存失效
+        QueryCache.InvalidateCache(t);
 
         if (IsInMemory(t)) return;
 
@@ -375,14 +405,18 @@ internal class MemoryDB
         var propertyKey = GetPropertyKey(t.FullName ?? "", propertyName);
         var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
         
-        // 使用新的高效索引结构
-        indexList.AddOrUpdate(valueKey, 
-            new HashSet<long> { cacheObject.Id }, 
-            (key, existingSet) =>
+        // 使用线程安全的索引操作
+        lock (indexLock)
+        {
+            if (indexList.TryGetValue(valueKey, out var existingSet))
             {
                 existingSet.Add(cacheObject.Id);
-                return existingSet;
-            });
+            }
+            else
+            {
+                indexList[valueKey] = new HashSet<long> { cacheObject.Id };
+            }
+        }
     }
 
     private static void MakeIndexByInsert(CacheObject cacheObject)
@@ -404,14 +438,18 @@ internal class MemoryDB
                 var propertyKey = GetPropertyKey(cacheObject.GetType().FullName ?? "", p.Name);
                 var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
                 
-                // 使用新的高效索引结构
-                indexList.AddOrUpdate(valueKey,
-                    new HashSet<long> { cacheObject.Id },
-                    (key, existingSet) =>
+                // 使用线程安全的索引操作
+                lock (indexLock)
+                {
+                    if (indexList.TryGetValue(valueKey, out var existingSet))
                     {
                         existingSet.Add(cacheObject.Id);
-                        return existingSet;
-                    });
+                    }
+                    else
+                    {
+                        indexList[valueKey] = new HashSet<long> { cacheObject.Id };
+                    }
+                }
             }
             
             // 类型感知索引（新功能）
@@ -455,13 +493,17 @@ internal class MemoryDB
             if (change.NewValue != null && !strUtil.IsNullOrEmpty(change.NewValue.ToString()))
             {
                 var newValueKey = GetValueKey(propertyKey, change.NewValue.ToString() ?? "");
-                indexList.AddOrUpdate(newValueKey,
-                    new HashSet<long> { cacheObject.Id },
-                    (key, existingSet) =>
+                lock (indexLock)
+                {
+                    if (indexList.TryGetValue(newValueKey, out var existingSet))
                     {
                         existingSet.Add(cacheObject.Id);
-                        return existingSet;
-                    });
+                    }
+                    else
+                    {
+                        indexList[newValueKey] = new HashSet<long> { cacheObject.Id };
+                    }
+                }
             }
             
             // 更新类型感知索引
@@ -502,13 +544,17 @@ internal class MemoryDB
         
         // 添加新索引
         var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
-        indexList.AddOrUpdate(valueKey,
-            new HashSet<long> { cacheObject.Id },
-            (key, existingSet) =>
+        lock (indexLock)
+        {
+            if (indexList.TryGetValue(valueKey, out var existingSet))
             {
                 existingSet.Add(cacheObject.Id);
-                return existingSet;
-            });
+            }
+            else
+            {
+                indexList[valueKey] = new HashSet<long> { cacheObject.Id };
+            }
+        }
     }
 
     private static void MakeIndexByDelete(CacheObject cacheObject)
@@ -538,32 +584,34 @@ internal class MemoryDB
         IncrementalIndexManager.RemoveSnapshot(cacheObject.Id);
     }
 
-    // 新的优化删除方法 - O(1) 复杂度
+    // 新的优化删除方法 - O(1) 复杂度，线程安全
     private static void DeleteOldValueIdMapOptimized(String propertyKeyPrefix, long oid)
     {
         // 找到所有以该属性为前缀的索引键并删除对应的ID
-        var keysToUpdate = new List<string>();
         var keysToRemove = new List<string>();
         
-        foreach (var kvp in indexList)
+        lock (indexLock)
         {
-            if (kvp.Key.StartsWith(propertyKeyPrefix + ":"))
+            foreach (var kvp in indexList.ToList())
             {
-                if (kvp.Value.Contains(oid))
+                if (kvp.Key.StartsWith(propertyKeyPrefix + ":"))
                 {
-                    kvp.Value.Remove(oid);
-                    if (kvp.Value.Count == 0)
+                    if (kvp.Value.Contains(oid))
                     {
-                        keysToRemove.Add(kvp.Key);
+                        kvp.Value.Remove(oid);
+                        if (kvp.Value.Count == 0)
+                        {
+                            keysToRemove.Add(kvp.Key);
+                        }
                     }
                 }
             }
-        }
-        
-        // 删除空的索引项
-        foreach (var key in keysToRemove)
-        {
-            indexList.TryRemove(key, out _);
+            
+            // 删除空的索引项
+            foreach (var key in keysToRemove)
+            {
+                indexList.TryRemove(key, out _);
+            }
         }
     }
 
@@ -688,4 +736,73 @@ internal class MemoryDB
         IncrementalIndexManager.ClearSnapshots();
     }
 
+    // =================================
+    // 高并发性能监控和优化方法
+    // =================================
+    
+    /// <summary>
+    /// 获取索引统计信息
+    /// </summary>
+    public static Dictionary<string, int> GetIndexStatistics()
+    {
+        var stats = new Dictionary<string, int>();
+        lock (indexLock)
+        {
+            foreach (var kvp in indexList)
+            {
+                stats[kvp.Key] = kvp.Value.Count;
+            }
+        }
+        return stats;
+    }
+    
+    /// <summary>
+    /// 清理空的索引条目
+    /// </summary>
+    public static void CleanupEmptyIndexes()
+    {
+        var keysToRemove = new List<string>();
+        lock (indexLock)
+        {
+            foreach (var kvp in indexList.ToList())
+            {
+                if (kvp.Value.Count == 0)
+                {
+                    keysToRemove.Add(kvp.Key);
+                }
+            }
+            
+            foreach (var key in keysToRemove)
+            {
+                indexList.TryRemove(key, out _);
+            }
+        }
+    }
+    
+    /// <summary>
+    /// 获取索引总数
+    /// </summary>
+    public static int GetIndexCount()
+    {
+        return indexList.Count;
+    }
+    
+    /// <summary>
+    /// 获取索引内存使用估算（字节）
+    /// </summary>
+    public static long GetIndexMemoryUsage()
+    {
+        long totalMemory = 0;
+        lock (indexLock)
+        {
+            foreach (var kvp in indexList)
+            {
+                // 估算：键的字符串长度 * 2 (Unicode) + HashSet的大小估算
+                totalMemory += kvp.Key.Length * 2;
+                totalMemory += kvp.Value.Count * 8; // 每个long占8字节
+                totalMemory += 32; // HashSet的开销估算
+            }
+        }
+        return totalMemory;
+    }
 }
