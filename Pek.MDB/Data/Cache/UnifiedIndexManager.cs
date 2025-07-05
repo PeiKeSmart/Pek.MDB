@@ -60,16 +60,18 @@ public static class UnifiedIndexManager
     /// </summary>
     public static HashSet<long> FindIds(Type type, string propertyName, object value)
     {
-        // 查询优化：自动选择最佳策略
-        var strategy = QueryOptimizer.AnalyzeQuery(type, propertyName, QueryType.Exact, value);
-        
-        if (strategy.UseTypedIndex && _enableTypedIndex)
+        // 简化的策略：优先使用类型感知索引，失败则回退
+        if (_enableTypedIndex)
         {
             // 优先使用类型感知索引
-            var typedResults = TypedIndexManager.FindByValue(type, propertyName, value);
-            if (typedResults.Count > 0)
+            var propertyType = GetPropertyType(type, propertyName);
+            if (propertyType != null)
             {
-                return typedResults;
+                var typedResults = TypedIndexManager.FindByValue(type, propertyName, value);
+                if (typedResults.Count > 0)
+                {
+                    return typedResults;
+                }
             }
         }
 

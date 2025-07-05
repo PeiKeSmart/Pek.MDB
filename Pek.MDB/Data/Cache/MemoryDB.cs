@@ -181,56 +181,19 @@ internal class MemoryDB
 
     internal static IList FindBy(Type t, String propertyName, Object val)
     {
-        // 使用查询缓存（如果启用）
-        var cacheKey = $"{t.FullName}_{propertyName}_{val}";
-        
-        var cachedResults = QueryCache.GetCachedResult(cacheKey, () =>
+        var results = new List<object>();
+
+        // 简化的策略：直接使用统一索引管理器
+        var idSet = UnifiedIndexManager.FindIds(t, propertyName, val);
+        foreach (var id in idSet)
         {
-            var startTime = DateTime.Now;
-            var results = new List<object>();
-            bool usedTypedIndex = false;
-
-            // 使用查询优化器分析最佳策略
-            var strategy = QueryOptimizer.AnalyzeQuery(t, propertyName, QueryType.Exact, val);
-
-            if (strategy.UseTypedIndex && _enableTypedIndex)
-            {
-                // 使用类型感知索引
-                var idSet = TypedIndexManager.FindByValue(t, propertyName, val);
-                foreach (var id in idSet)
-                {
-                    var obj = FindById(t, id);
-                    if (obj != null) results.Add(obj);
-                }
-                usedTypedIndex = true;
-            }
-            else
-            {
-                // 使用传统字符串索引
-                var propertyKey = GetPropertyKey(t.FullName!, propertyName);
-                var valueKey = GetValueKey(propertyKey, val.ToString()!);
-                
-                if (indexList.TryGetValue(valueKey, out var idSet2))
-                {
-                    foreach (var id in idSet2)
-                    {
-                        var obj = FindById(t, id);
-                        if (obj != null) results.Add(obj);
-                    }
-                }
-            }
-
-            // 记录查询性能数据
-            var executionTime = (DateTime.Now - startTime).TotalMilliseconds;
-            QueryOptimizer.RecordQueryResult(t, propertyName, QueryType.Exact, 
-                usedTypedIndex, executionTime, results.Count);
-
-            return results;
-        });
+            var obj = FindById(t, id);
+            if (obj != null) results.Add(obj);
+        }
 
         // 转换回 ArrayList 以保持兼容性
         var arrayList = new ArrayList();
-        foreach (var item in cachedResults)
+        foreach (var item in results)
         {
             arrayList.Add(item);
         }
@@ -258,9 +221,7 @@ internal class MemoryDB
 
         MakeIndexByInsert(obj);
 
-        // 使缓存失效
-        QueryCache.InvalidateCache(t);
-
+        // 简化：直接进行持久化，不使用缓存
         if (IsInMemory(t)) return;
 
         Serialize(t);
@@ -338,9 +299,7 @@ internal class MemoryDB
 
         MakeIndexByUpdate(obj);
 
-        // 使缓存失效
-        QueryCache.InvalidateCache(t);
-
+        // 简化：直接进行持久化，不使用缓存
         if (IsInMemory(t)) return new Result();
 
         try
@@ -370,9 +329,7 @@ internal class MemoryDB
 
         DeleteIdIndex(_typeFullName, obj.Id);
 
-        // 使缓存失效
-        QueryCache.InvalidateCache(t);
-
+        // 简化：直接进行持久化，不使用缓存
         if (IsInMemory(t)) return;
 
         Serialize(t, list);
@@ -423,12 +380,13 @@ internal class MemoryDB
     {
         if (cacheObject == null) return;
         
-        var properties = IncrementalIndexManager.GetIndexableProperties(cacheObject.GetType());
+        // 简化：直接获取所有可读属性
+        var properties = cacheObject.GetType().GetProperties()
+            .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
+            .ToArray();
         
         foreach (var p in properties)
         {
-            if (!p.CanRead) continue;
-            
             var pValue = rft.GetPropertyValue(cacheObject, p.Name);
             if (pValue == null) continue;
             
@@ -458,78 +416,15 @@ internal class MemoryDB
                 TypedIndexManager.AddIndex(cacheObject.GetType(), p.Name, p.PropertyType, pValue, cacheObject.Id);
             }
         }
-        
-        // 创建对象快照用于后续增量更新
-        IncrementalIndexManager.CreateSnapshot(cacheObject);
     }
 
     private static void MakeIndexByUpdate(CacheObject cacheObject)
     {
         if (cacheObject == null) return;
         
-        // 获取属性变化列表
-        var changedProperties = IncrementalIndexManager.GetChangedProperties(cacheObject);
-        
-        foreach (var change in changedProperties)
-        {
-            var propertyKey = GetPropertyKey(cacheObject.GetType().FullName ?? "", change.PropertyName);
-            
-            // 更新传统字符串索引
-            // 删除旧索引
-            if (change.OldValue != null && !strUtil.IsNullOrEmpty(change.OldValue.ToString()))
-            {
-                var oldValueKey = GetValueKey(propertyKey, change.OldValue.ToString() ?? "");
-                if (indexList.TryGetValue(oldValueKey, out var oldSet))
-                {
-                    oldSet.Remove(cacheObject.Id);
-                    if (oldSet.Count == 0)
-                    {
-                        indexList.TryRemove(oldValueKey, out _);
-                    }
-                }
-            }
-            
-            // 添加新索引
-            if (change.NewValue != null && !strUtil.IsNullOrEmpty(change.NewValue.ToString()))
-            {
-                var newValueKey = GetValueKey(propertyKey, change.NewValue.ToString() ?? "");
-                lock (indexLock)
-                {
-                    if (indexList.TryGetValue(newValueKey, out var existingSet))
-                    {
-                        existingSet.Add(cacheObject.Id);
-                    }
-                    else
-                    {
-                        indexList[newValueKey] = new HashSet<long> { cacheObject.Id };
-                    }
-                }
-            }
-            
-            // 更新类型感知索引
-            if (_enableTypedIndex)
-            {
-                // 获取属性类型
-                var property = cacheObject.GetType().GetProperty(change.PropertyName);
-                if (property != null)
-                {
-                    // 移除旧值
-                    if (change.OldValue != null)
-                    {
-                        TypedIndexManager.RemoveIndex(cacheObject.GetType(), change.PropertyName, change.OldValue, cacheObject.Id);
-                    }
-                    
-                    // 添加新值
-                    if (change.NewValue != null)
-                    {
-                        TypedIndexManager.AddIndex(cacheObject.GetType(), change.PropertyName, property.PropertyType, change.NewValue, cacheObject.Id);
-                    }
-                }
-            }
-        }
-        
-        // 更新对象快照
-        IncrementalIndexManager.UpdateSnapshot(cacheObject);
+        // 简化：先删除所有旧索引，然后重新创建索引
+        MakeIndexByDelete(cacheObject);
+        MakeIndexByInsert(cacheObject);
     }
 
     private static void MakeIndexByUpdate(CacheObject cacheObject, String propertyName, Object pValue)
@@ -561,7 +456,10 @@ internal class MemoryDB
     {
         if (cacheObject == null) return;
         
-        var properties = IncrementalIndexManager.GetIndexableProperties(cacheObject.GetType());
+        // 简化：直接获取所有可读属性
+        var properties = cacheObject.GetType().GetProperties()
+            .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
+            .ToArray();
         
         foreach (var p in properties)
         {
@@ -570,7 +468,7 @@ internal class MemoryDB
             DeleteOldValueIdMapOptimized(propertyKey, cacheObject.Id);
             
             // 删除类型感知索引
-            if (_enableTypedIndex && p.CanRead)
+            if (_enableTypedIndex)
             {
                 var pValue = rft.GetPropertyValue(cacheObject, p.Name);
                 if (pValue != null)
@@ -579,9 +477,6 @@ internal class MemoryDB
                 }
             }
         }
-        
-        // 删除对象快照
-        IncrementalIndexManager.RemoveSnapshot(cacheObject.Id);
     }
 
     // 新的优化删除方法 - O(1) 复杂度，线程安全
@@ -733,7 +628,7 @@ internal class MemoryDB
         _hasCheckedFileDB = new Hashtable();
         objectList = Hashtable.Synchronized(new Hashtable());
         indexList = new ConcurrentDictionary<string, HashSet<long>>();
-        IncrementalIndexManager.ClearSnapshots();
+        // 简化：不再需要清理快照
     }
 
     // =================================
