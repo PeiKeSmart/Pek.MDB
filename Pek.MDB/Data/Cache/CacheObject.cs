@@ -137,12 +137,6 @@ public class CacheObject
     /// <summary>
     ///  不持久化，也不做索引
     /// </summary>
-    /// <returns></returns>
-    public static Result UpdateNoIndex()
-    {
-        return new Result();
-    }
-
     /// <summary>
     /// 删除数据
     /// </summary>

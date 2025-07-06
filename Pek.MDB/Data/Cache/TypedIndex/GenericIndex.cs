@@ -97,7 +97,7 @@ public class GenericIndex : TypedIndexBase
             {
                 // *abc* - 包含匹配
                 var searchTerm = pattern.Substring(1, pattern.Length - 2);
-                return value.Contains(searchTerm, StringComparison.OrdinalIgnoreCase);
+                return value.IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0;
             }
             else if (pattern.StartsWith("*"))
             {

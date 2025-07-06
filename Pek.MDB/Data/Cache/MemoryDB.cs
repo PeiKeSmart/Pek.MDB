@@ -628,30 +628,6 @@ internal class MemoryDB
     // 传统索引相关的方法已被类型感知索引替代
 
     /// <summary>
-    /// 获取索引统计信息 - 基于类型感知索引
-    /// </summary>
-    /// <returns>索引统计信息</returns>
-    public static IndexStats GetIndexStats()
-    {
-        return new IndexStats
-        {
-            TotalIndexes = TypedIndexManager.GetIndexCount(),
-            TotalEntries = 0, // 待 TypedIndexManager 实现具体方法
-            MemoryUsage = 0 // 待 TypedIndexManager 实现具体方法
-        };
-    }
-
-    /// <summary>
-    /// 索引统计信息
-    /// </summary>
-    public class IndexStats
-    {
-        public int TotalIndexes { get; set; }
-        public int TotalEntries { get; set; }
-        public long MemoryUsage { get; set; }
-    }
-
-    /// <summary>
     /// 批量插入对象 - 性能优化
     /// </summary>
     /// <param name="objects">要插入的对象集合</param>

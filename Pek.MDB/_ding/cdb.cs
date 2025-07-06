@@ -1,4 +1,5 @@
 ﻿using System.Collections;
+using DH.Data.Cache.TypedIndex;
 
 namespace DH;
 
@@ -32,17 +33,6 @@ public class cdb
     {
         Object obj = MemoryDB.FindById(typeof(T), id);
         return (T)obj;
-    }
-
-    /// <summary>
-    /// 根据名称查询数据，因为已经根据名称做了索引，所以速度很快。
-    /// </summary>
-    /// <typeparam name="T"></typeparam>
-    /// <param name="name"></param>
-    /// <returns>返回数据列表</returns>
-    public static List<T> FindByName<T>(String name) where T : CacheObject
-    {
-        return FindBy<T>("Name", name);
     }
 
     /// <summary>
@@ -101,15 +91,6 @@ public class cdb
     }
 
     /// <summary>
-    ///  更新数据（不持久化，也不做索引）
-    /// </summary>
-    /// <returns></returns>
-    public static Result UpdateNoIndex(CacheObject obj)
-    {
-        return new Result();
-    }
-
-    /// <summary>
     /// 从内存中删除数据，并同步磁盘中内容。
     /// </summary>
     /// <param name="obj"></param>
@@ -128,7 +109,20 @@ public class cdb
     /// <returns>返回数据列表</returns>
     public static List<T> FindByRange<T>(String propertyName, IComparable minValue, IComparable maxValue) where T : CacheObject
     {
-        return TypedQueryExtensions.FindByRange<T>(propertyName, minValue, maxValue);
+        var type = typeof(T);
+        var idSet = TypedIndexManager.FindByRange(type, propertyName, minValue, maxValue);
+        
+        var results = new List<T>();
+        foreach (var id in idSet)
+        {
+            var obj = MemoryDB.FindById(type, id);
+            if (obj is T typedObj)
+            {
+                results.Add(typedObj);
+            }
+        }
+        
+        return results;
     }
 
     /// <summary>
@@ -140,7 +134,20 @@ public class cdb
     /// <returns>返回数据列表</returns>
     public static List<T> FindByLike<T>(String propertyName, String pattern) where T : CacheObject
     {
-        return TypedQueryExtensions.FindByLike<T>(propertyName, pattern);
+        var type = typeof(T);
+        var idSet = TypedIndexManager.FindByPattern(type, propertyName, pattern);
+        
+        var results = new List<T>();
+        foreach (var id in idSet)
+        {
+            var obj = MemoryDB.FindById(type, id);
+            if (obj is T typedObj)
+            {
+                results.Add(typedObj);
+            }
+        }
+        
+        return results;
     }
 
     /// <summary>
@@ -151,7 +158,54 @@ public class cdb
     /// <returns>返回数据列表</returns>
     public static List<T> FindByMultiple<T>(Dictionary<String, Object> conditions) where T : CacheObject
     {
-        return TypedQueryExtensions.FindByMultiple<T>(conditions);
+        if (conditions == null || conditions.Count == 0)
+        {
+            return new List<T>();
+        }
+
+        var type = typeof(T);
+        HashSet<long>? resultSet = null;
+
+        foreach (var condition in conditions)
+        {
+            var propertyName = condition.Key;
+            var value = condition.Value;
+            
+            var currentSet = TypedIndexManager.FindByValue(type, propertyName, value);
+            
+            if (resultSet == null)
+            {
+                resultSet = currentSet;
+            }
+            else
+            {
+                // 求交集
+                resultSet.IntersectWith(currentSet);
+            }
+            
+            // 如果交集为空，提前退出
+            if (resultSet.Count == 0)
+            {
+                break;
+            }
+        }
+
+        if (resultSet == null || resultSet.Count == 0)
+        {
+            return new List<T>();
+        }
+
+        var results = new List<T>();
+        foreach (var id in resultSet)
+        {
+            var obj = MemoryDB.FindById(type, id);
+            if (obj is T typedObj)
+            {
+                results.Add(typedObj);
+            }
+        }
+        
+        return results;
     }
 
     /// <summary>
@@ -162,7 +216,19 @@ public class cdb
     /// <returns>ID到对象的映射</returns>
     public static Dictionary<long, T> FindByIds<T>(IEnumerable<long> ids) where T : CacheObject
     {
-        return TypedQueryExtensions.FindByIds<T>(ids);
+        var type = typeof(T);
+        var results = new Dictionary<long, T>();
+        
+        foreach (var id in ids)
+        {
+            var obj = MemoryDB.FindById(type, id);
+            if (obj is T typedObj)
+            {
+                results[id] = typedObj;
+            }
+        }
+        
+        return results;
     }
 
     /// <summary>
@@ -176,72 +242,85 @@ public class cdb
     /// <returns>分页结果</returns>
     public static PagedResult<T> FindByPage<T>(String? propertyName = null, int pageIndex = 0, int pageSize = 10, bool ascending = true) where T : CacheObject
     {
-        return TypedQueryExtensions.FindByPage<T>(propertyName, pageIndex, pageSize, ascending);
+        var type = typeof(T);
+        var allObjects = MemoryDB.FindAll(type);
+        
+        var typedObjects = allObjects.Cast<T>();
+        
+        // 如果指定了排序属性，进行排序
+        if (!string.IsNullOrEmpty(propertyName))
+        {
+            var property = type.GetProperty(propertyName);
+            if (property != null)
+            {
+                typedObjects = ascending 
+                    ? typedObjects.OrderBy(obj => property.GetValue(obj))
+                    : typedObjects.OrderByDescending(obj => property.GetValue(obj));
+            }
+        }
+
+        var totalCount = typedObjects.Count();
+        var pagedItems = typedObjects.Skip(pageIndex * pageSize).Take(pageSize).ToList();
+        
+        return new PagedResult<T>
+        {
+            Items = pagedItems,
+            PageIndex = pageIndex,
+            PageSize = pageSize,
+            TotalCount = totalCount,
+            TotalPages = (int)Math.Ceiling((double)totalCount / pageSize)
+        };
     }
+
+    // API 简化说明：
+    // - 移除了 FindByName: 使用 FindBy<T>("Name", name) 替代
+    // - 移除了 FindByNumericRange: 使用 FindByRange<T>(propertyName, min, max) 替代  
+    // - 移除了 FindByDateRange: 使用 FindByRange<T>(propertyName, startDate, endDate) 替代
+    // - 移除了 FindByContains: 使用 FindByLike<T>(propertyName, "*text*") 替代
+    // - 移除了 FindByStartsWith: 使用 FindByLike<T>(propertyName, "text*") 替代
+    // - 移除了 FindByEndsWith: 使用 FindByLike<T>(propertyName, "*text") 替代
+    // 
+    // 保留的核心API可以满足所有查询需求，代码更加简洁一致
+}
+
+/// <summary>
+/// 分页结果
+/// </summary>
+/// <typeparam name="T">数据类型</typeparam>
+public class PagedResult<T>
+{
+    /// <summary>
+    /// 当前页的数据项
+    /// </summary>
+    public List<T> Items { get; set; } = new();
 
     /// <summary>
-    /// 数值范围查询的便捷方法
+    /// 页索引（从0开始）
     /// </summary>
-    /// <typeparam name="T"></typeparam>
-    /// <param name="propertyName">数值属性名称</param>
-    /// <param name="min">最小值</param>
-    /// <param name="max">最大值</param>
-    /// <returns>匹配的数据列表</returns>
-    public static List<T> FindByNumericRange<T>(String propertyName, decimal min, decimal max) where T : CacheObject
-    {
-        return TypedQueryExtensions.FindByRange<T>(propertyName, min, max);
-    }
+    public int PageIndex { get; set; }
 
     /// <summary>
-    /// 日期范围查询的便捷方法
+    /// 页大小
     /// </summary>
-    /// <typeparam name="T"></typeparam>
-    /// <param name="propertyName">日期属性名称</param>
-    /// <param name="startDate">开始日期</param>
-    /// <param name="endDate">结束日期</param>
-    /// <returns>匹配的数据列表</returns>
-    public static List<T> FindByDateRange<T>(String propertyName, DateTime startDate, DateTime endDate) where T : CacheObject
-    {
-        return TypedQueryExtensions.FindByRange<T>(propertyName, startDate, endDate);
-    }
+    public int PageSize { get; set; }
 
     /// <summary>
-    /// 字符串包含查询的便捷方法
+    /// 总记录数
     /// </summary>
-    /// <typeparam name="T"></typeparam>
-    /// <param name="propertyName">字符串属性名称</param>
-    /// <param name="searchText">搜索文本</param>
-    /// <returns>匹配的数据列表</returns>
-    public static List<T> FindByContains<T>(String propertyName, String searchText) where T : CacheObject
-    {
-        return TypedQueryExtensions.FindByLike<T>(propertyName, $"*{searchText}*");
-    }
+    public int TotalCount { get; set; }
 
     /// <summary>
-    /// 字符串开头匹配查询的便捷方法
+    /// 总页数
     /// </summary>
-    /// <typeparam name="T"></typeparam>
-    /// <param name="propertyName">字符串属性名称</param>
-    /// <param name="prefix">前缀</param>
-    /// <returns>匹配的数据列表</returns>
-    public static List<T> FindByStartsWith<T>(String propertyName, String prefix) where T : CacheObject
-    {
-        return TypedQueryExtensions.FindByLike<T>(propertyName, $"{prefix}*");
-    }
+    public int TotalPages { get; set; }
 
     /// <summary>
-    /// 字符串结尾匹配查询的便捷方法
+    /// 是否有上一页
     /// </summary>
-    /// <typeparam name="T"></typeparam>
-    /// <param name="propertyName">字符串属性名称</param>
-    /// <param name="suffix">后缀</param>
-    /// <returns>匹配的数据列表</returns>
-    public static List<T> FindByEndsWith<T>(String propertyName, String suffix) where T : CacheObject
-    {
-        return TypedQueryExtensions.FindByLike<T>(propertyName, $"*{suffix}");
-    }
+    public bool HasPreviousPage => PageIndex > 0;
 
-    // 移除用户无关的配置接口，系统自动提供最优性能
-    // 原 EnableTypedIndex 和 IsTypedIndexEnabled 方法已移除
-    // 所有索引优化对用户透明，无需手动配置
+    /// <summary>
+    /// 是否有下一页
+    /// </summary>
+    public bool HasNextPage => PageIndex < TotalPages - 1;
 }
