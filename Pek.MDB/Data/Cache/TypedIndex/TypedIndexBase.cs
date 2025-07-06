@@ -8,8 +8,7 @@ namespace DH.Data.Cache.TypedIndex;
 /// </summary>
 public abstract class TypedIndexBase : ITypedIndex
 {
-    protected readonly ConcurrentDictionary<object, HashSet<long>> _index = new();
-    protected readonly object _lock = new();
+    protected readonly ConcurrentDictionary<object, ConcurrentHashSet<long>> _index = new();
     protected int _queryCount = 0;
     protected int _hitCount = 0;
     protected DateTime _lastAccessed = DateTime.Now;
@@ -20,13 +19,10 @@ public abstract class TypedIndexBase : ITypedIndex
         if (value == null) return;
 
         _index.AddOrUpdate(value,
-            new HashSet<long> { id },
+            new ConcurrentHashSet<long> { id },
             (key, existingSet) =>
             {
-                lock (_lock)
-                {
-                    existingSet.Add(id);
-                }
+                existingSet.Add(id);
                 return existingSet;
             });
     }
@@ -37,13 +33,10 @@ public abstract class TypedIndexBase : ITypedIndex
 
         if (_index.TryGetValue(value, out var idSet))
         {
-            lock (_lock)
+            idSet.Remove(id);
+            if (idSet.Count == 0)
             {
-                idSet.Remove(id);
-                if (idSet.Count == 0)
-                {
-                    _index.TryRemove(value, out _);
-                }
+                _index.TryRemove(value, out _);
             }
         }
     }
@@ -58,7 +51,7 @@ public abstract class TypedIndexBase : ITypedIndex
         if (_index.TryGetValue(value, out var idSet))
         {
             Interlocked.Increment(ref _hitCount);
-            return new HashSet<long>(idSet);
+            return idSet.ToHashSet(); // 返回线程安全的快照
         }
 
         return new HashSet<long>();

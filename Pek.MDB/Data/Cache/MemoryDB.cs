@@ -17,13 +17,16 @@ namespace DH;
 internal class MemoryDB
 {
 
-    private static IDictionary objectList = Hashtable.Synchronized([]);
+    private static readonly ConcurrentDictionary<string, IList> objectList = new();
     
     // 类型级别锁 - 提升并发性能
     private static readonly ConcurrentDictionary<Type, object> _typeLocks = new();
     
     // 原子ID生成器 - 避免ID冲突
     private static readonly ConcurrentDictionary<Type, long> _typeIdCounters = new();
+    
+    // 文件加载检查 - 线程安全
+    private static readonly ConcurrentDictionary<Type, bool> _hasCheckedFileDB = new();
     
     /// <summary>
     /// 获取类型的可读属性（现代.NET反射性能已足够）
@@ -59,7 +62,13 @@ internal class MemoryDB
 
     public static IDictionary GetObjectsMap()
     {
-        return objectList;
+        // 转换为兼容的字典格式
+        var hashtable = new Hashtable();
+        foreach (var kvp in objectList)
+        {
+            hashtable[kvp.Key] = kvp.Value;
+        }
+        return hashtable;
     }
 
     public static IDictionary GetIndexMap()
@@ -74,40 +83,31 @@ internal class MemoryDB
 
     private static IList GetObjectsByName(Type t)
     {
-
         if (IsCheckFileDB(t))
         {
-
             lock (objLock)
             {
-
                 if (IsCheckFileDB(t))
                 {
-
                     LoadDataFromFile(t);
                     _hasCheckedFileDB[t] = true;
-
                 }
-
             }
-
         }
-        return (objectList[t.FullName] as IList);
+        
+        return objectList.TryGetValue(t.FullName, out var list) ? list : new ArrayList();
     }
-
-    private static Hashtable _hasCheckedFileDB = [];
 
     private static Boolean IsCheckFileDB(Type t)
     {
-        if (_hasCheckedFileDB[t] == null) return true;
-        return false;
+        return !_hasCheckedFileDB.ContainsKey(t);
     }
 
     private static void LoadDataFromFile(Type t)
     {
         if (IO.File.Exists(GetCachePath(t)))
         {
-            IList list = GetListWithIndex(IO.File.Read(GetCachePath(t)), t);
+            var list = GetListWithIndex(IO.File.Read(GetCachePath(t)), t);
             objectList[t.FullName] = list;
         }
         else
@@ -533,23 +533,22 @@ internal class MemoryDB
 
     //-------------------------- Id Index --------------------------------
 
+    // ID索引存储：使用单独的字典存储ID索引
+    private static readonly ConcurrentDictionary<string, IDictionary> _idIndexes = new();
+
     private static IDictionary GetIdIndexMap(String key)
     {
-        if (objectList[key] == null)
-        {
-            objectList[key] = new Hashtable();
-        }
-        return (objectList[key] as IDictionary);
+        return _idIndexes.GetOrAdd(key, _ => new Hashtable());
     }
 
     private static void UpdateIdIndexMap(String key, IDictionary map)
     {
-        objectList[key] = map;
+        _idIndexes[key] = map;
     }
 
     private static void ClearIdIndexMap(String key)
     {
-        objectList.Remove(key);
+        _idIndexes.TryRemove(key, out _);
     }
 
 
@@ -607,8 +606,9 @@ internal class MemoryDB
 
     internal static void Clear()
     {
-        _hasCheckedFileDB = new Hashtable();
-        objectList = Hashtable.Synchronized(new Hashtable());
+        _hasCheckedFileDB.Clear();
+        objectList.Clear();
+        _idIndexes.Clear();
         // 清理类型感知索引
         TypedIndexManager.ClearAllIndexes();
     }

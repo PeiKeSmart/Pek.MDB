@@ -9,9 +9,9 @@ namespace DH.Data.Cache.TypedIndex;
 public class StringIndex : TypedIndexBase
 {
     // 用于模糊查询的额外索引
-    private readonly ConcurrentDictionary<string, HashSet<long>> _lowerCaseIndex = new();
-    private readonly ConcurrentDictionary<string, HashSet<long>> _prefixIndex = new();
-    private readonly ConcurrentDictionary<string, HashSet<long>> _suffixIndex = new();
+    private readonly ConcurrentDictionary<string, ConcurrentHashSet<long>> _lowerCaseIndex = new();
+    private readonly ConcurrentDictionary<string, ConcurrentHashSet<long>> _prefixIndex = new();
+    private readonly ConcurrentDictionary<string, ConcurrentHashSet<long>> _suffixIndex = new();
 
     public override void AddId(object value, long id)
     {
@@ -26,7 +26,7 @@ public class StringIndex : TypedIndexBase
         // 添加到模糊查询索引
         var lowerValue = stringValue.ToLowerInvariant();
         _lowerCaseIndex.AddOrUpdate(lowerValue,
-            new HashSet<long> { id },
+            new ConcurrentHashSet<long> { id },
             (key, existingSet) =>
             {
                 existingSet.Add(id);
@@ -34,11 +34,11 @@ public class StringIndex : TypedIndexBase
             });
 
         // 添加前缀索引（支持以xxx开头的查询）
-        for (int i = 1; i <= Math.Min(stringValue.Length, 10); i++)
+        for (var i = 1; i <= Math.Min(stringValue.Length, 10); i++)
         {
             var prefix = stringValue.Substring(0, i).ToLowerInvariant();
             _prefixIndex.AddOrUpdate(prefix,
-                new HashSet<long> { id },
+                new ConcurrentHashSet<long> { id },
                 (key, existingSet) =>
                 {
                     existingSet.Add(id);
@@ -47,11 +47,11 @@ public class StringIndex : TypedIndexBase
         }
 
         // 添加后缀索引（支持以xxx结尾的查询）
-        for (int i = 1; i <= Math.Min(stringValue.Length, 10); i++)
+        for (var i = 1; i <= Math.Min(stringValue.Length, 10); i++)
         {
             var suffix = stringValue.Substring(stringValue.Length - i).ToLowerInvariant();
             _suffixIndex.AddOrUpdate(suffix,
-                new HashSet<long> { id },
+                new ConcurrentHashSet<long> { id },
                 (key, existingSet) =>
                 {
                     existingSet.Add(id);
@@ -82,7 +82,7 @@ public class StringIndex : TypedIndexBase
         }
 
         // 从前缀索引移除
-        for (int i = 1; i <= Math.Min(stringValue.Length, 10); i++)
+        for (var i = 1; i <= Math.Min(stringValue.Length, 10); i++)
         {
             var prefix = stringValue.Substring(0, i).ToLowerInvariant();
             if (_prefixIndex.TryGetValue(prefix, out var prefixSet))
@@ -96,7 +96,7 @@ public class StringIndex : TypedIndexBase
         }
 
         // 从后缀索引移除
-        for (int i = 1; i <= Math.Min(stringValue.Length, 10); i++)
+        for (var i = 1; i <= Math.Min(stringValue.Length, 10); i++)
         {
             var suffix = stringValue.Substring(stringValue.Length - i).ToLowerInvariant();
             if (_suffixIndex.TryGetValue(suffix, out var suffixSet))
