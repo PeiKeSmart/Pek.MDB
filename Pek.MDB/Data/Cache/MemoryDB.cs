@@ -16,11 +16,8 @@ namespace DH;
 
 internal class MemoryDB
 {
-    // 新的优化存储结构：直接 ID 映射，避免间接查找
+    // 优化后的存储结构：直接 ID 映射，避免间接查找
     private static readonly ConcurrentDictionary<string, ConcurrentDictionary<long, CacheObject>> _objectsById = new();
-    
-    // 保留原有结构用于兼容性（将逐步淘汰）
-    private static readonly ConcurrentDictionary<string, IList> objectList = new();
     
     // 类型级别锁 - 提升并发性能
     private static readonly ConcurrentDictionary<Type, object> _typeLocks = new();
@@ -65,11 +62,16 @@ internal class MemoryDB
 
     public static IDictionary GetObjectsMap()
     {
-        // 转换为兼容的字典格式
+        // 转换为兼容的字典格式（基于新的 _objectsById 结构）
         var hashtable = new Hashtable();
-        foreach (var kvp in objectList)
+        foreach (var typeKvp in _objectsById)
         {
-            hashtable[kvp.Key] = kvp.Value;
+            var arrayList = new ArrayList();
+            foreach (var obj in typeKvp.Value.Values)
+            {
+                arrayList.Add(obj);
+            }
+            hashtable[typeKvp.Key] = arrayList;
         }
         return hashtable;
     }
@@ -102,8 +104,14 @@ internal class MemoryDB
                 }
             }
         }
-        
-        return objectList.TryGetValue(t.FullName, out var list) ? list : new ArrayList();
+        // 基于新的 _objectsById 结构返回数据
+        var typeObjects = _objectsById.GetOrAdd(t.FullName, _ => new ConcurrentDictionary<long, CacheObject>());
+        var arrayList = new ArrayList();
+        foreach (var obj in typeObjects.Values)
+        {
+            arrayList.Add(obj);
+        }
+        return arrayList;
     }
 
     private static Boolean IsCheckFileDB(Type t)
@@ -115,22 +123,17 @@ internal class MemoryDB
     {
         if (IO.File.Exists(GetCachePath(t)))
         {
-            var list = GetListWithIndex(IO.File.Read(GetCachePath(t)), t);
-            objectList[t.FullName] = list;
+            GetListWithIndex(IO.File.Read(GetCachePath(t)), t);
         }
-        else
-        {
-            objectList[t.FullName] = new ArrayList();
-        }
+        // 无需初始化空列表，因为 _objectsById 会自动处理
     }
 
-    private static IList GetListWithIndex(String jsonString, Type t)
+    private static void GetListWithIndex(String jsonString, Type t)
     {
-        var list = new ArrayList();
-
-        if (strUtil.IsNullOrEmpty(jsonString)) return list;
+        if (strUtil.IsNullOrEmpty(jsonString)) return;
 
         var lists = JsonParser.Parse(jsonString) as List<object>;
+        if (lists == null) return;
 
         // 获取新的优化数据结构
         var typeObjects = _objectsById.GetOrAdd(t.FullName, _ => new ConcurrentDictionary<long, CacheObject>());
@@ -138,14 +141,13 @@ internal class MemoryDB
         foreach (JsonObject jsonObject in lists)
         {
             var obj = TypedDeserializeHelper.deserializeType(t, jsonObject) as CacheObject;
-            var index = list.Add(obj);
-            
-            // 使用新的直接ID映射结构
-            typeObjects[obj.Id] = obj;
-            MakeIndexByInsert(obj);
+            if (obj != null)
+            {
+                // 直接存储到新的ID映射结构
+                typeObjects[obj.Id] = obj;
+                MakeIndexByInsert(obj);
+            }
         }
-
-        return list;
     }
 
     private static void Serialize(Type t)
@@ -240,11 +242,6 @@ internal class MemoryDB
         });
     }
 
-    private static void UpdateObjects(String key, IList list)
-    {
-        objectList[key] = list;
-    }
-
     //------------------------------------------------------------------------------
 
     internal static CacheObject FindById(Type t, long id)
@@ -306,16 +303,9 @@ internal class MemoryDB
             // 生成新的 ID
             obj.Id = GetNextIdAtomic(t);
             
-            // 新优化结构：直接存储到 ID 映射中
+            // 直接存储到优化的 ID 映射结构中
             var typeObjects = _objectsById.GetOrAdd(typeFullName, _ => new ConcurrentDictionary<long, CacheObject>());
             typeObjects[obj.Id] = obj;
-            
-            // 兼容性：同时更新旧结构（用于FindAll等方法）
-            var list = FindAll(t);
-            var index = list.Add(obj);
-            UpdateObjects(typeFullName, list);
-
-            MakeIndexByInsert(obj);
 
             MakeIndexByInsert(obj);
         }
@@ -340,11 +330,6 @@ internal class MemoryDB
             // 新结构：直接存储到 ID 映射中
             var typeObjects = _objectsById.GetOrAdd(_typeFullName, _ => new ConcurrentDictionary<long, CacheObject>());
             typeObjects[obj.Id] = obj;
-            
-            // 兼容性：同时更新旧结构
-            IList list = FindAll(t);
-            int index = list.Add(obj);
-            UpdateObjects(_typeFullName, list);
 
             MakeIndexByInsert(obj, propertyName, pValue);
         }
@@ -369,11 +354,6 @@ internal class MemoryDB
             // 新结构：直接存储到 ID 映射中
             var typeObjects = _objectsById.GetOrAdd(_typeFullName, _ => new ConcurrentDictionary<long, CacheObject>());
             typeObjects[obj.Id] = obj;
-            
-            // 兼容性：同时更新旧结构
-            IList list = FindAll(t);
-            int index = list.Add(obj);
-            UpdateObjects(_typeFullName, list);
 
             foreach (KeyValuePair<String, Object> kv in dic)
             {
@@ -446,24 +426,12 @@ internal class MemoryDB
             // 新优化结构：直接从 ID 映射中删除，O(1) 复杂度
             var typeObjects = _objectsById.GetOrAdd(typeFullName, _ => new ConcurrentDictionary<long, CacheObject>());
             typeObjects.TryRemove(obj.Id, out _);
-            
-            // 兼容性：同时更新旧结构
-            var list = FindAll(t);
-            list.Remove(obj);
-            UpdateObjects(typeFullName, list);
         }
 
         // 使用立即异步持久化
         if (IsInMemory(t)) return;
 
         StartAsyncPersistence(t);
-    }
-
-    private static long GetNextId(IList list)
-    {
-        if (list.Count == 0) return 1;
-        CacheObject preObject = list[list.Count - 1] as CacheObject;
-        return preObject.Id + 1;
     }
 
     private static Boolean IsInMemory(Type t)
@@ -591,7 +559,6 @@ internal class MemoryDB
     internal static void Clear()
     {
         _hasCheckedFileDB.Clear();
-        objectList.Clear();
         _objectsById.Clear(); // 清理新的ID映射结构
         // 清理类型感知索引
         TypedIndexManager.ClearAllIndexes();
@@ -616,7 +583,6 @@ internal class MemoryDB
             
             lock (typeLock)
             {
-                var list = FindAll(type);
                 var typeFullName = type.FullName;
                 var typeObjects = _objectsById.GetOrAdd(typeFullName, _ => new ConcurrentDictionary<long, CacheObject>());
                 
@@ -627,12 +593,9 @@ internal class MemoryDB
                     // 新结构：直接存储到 ID 映射中
                     typeObjects[obj.Id] = obj;
                     
-                    // 兼容性：同时更新旧结构
-                    var index = list.Add(obj);
+                    // 建立索引
                     MakeIndexByInsert(obj);
                 }
-                
-                UpdateObjects(typeFullName, list);
             }
             
             // 批量持久化
