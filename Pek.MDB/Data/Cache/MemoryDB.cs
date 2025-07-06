@@ -140,9 +140,8 @@ internal class MemoryDB
             var obj = TypedDeserializeHelper.deserializeType(t, jsonObject) as CacheObject;
             var index = list.Add(obj);
             
-            // 同时填充新旧两种数据结构
+            // 使用新的直接ID映射结构
             typeObjects[obj.Id] = obj;
-            AddIdIndex(t.FullName, obj.Id, index);
             MakeIndexByInsert(obj);
         }
 
@@ -311,11 +310,12 @@ internal class MemoryDB
             var typeObjects = _objectsById.GetOrAdd(typeFullName, _ => new ConcurrentDictionary<long, CacheObject>());
             typeObjects[obj.Id] = obj;
             
-            // 兼容性：同时更新旧结构
+            // 兼容性：同时更新旧结构（用于FindAll等方法）
             var list = FindAll(t);
             var index = list.Add(obj);
-            AddIdIndex(typeFullName, obj.Id, index);
             UpdateObjects(typeFullName, list);
+
+            MakeIndexByInsert(obj);
 
             MakeIndexByInsert(obj);
         }
@@ -335,11 +335,15 @@ internal class MemoryDB
         // 使用类型级别锁，提高并发性能
         lock (GetTypeLock(t))
         {
-            IList list = FindAll(t);
             obj.Id = GetNextIdAtomic(t); // 使用原子ID生成
+            
+            // 新结构：直接存储到 ID 映射中
+            var typeObjects = _objectsById.GetOrAdd(_typeFullName, _ => new ConcurrentDictionary<long, CacheObject>());
+            typeObjects[obj.Id] = obj;
+            
+            // 兼容性：同时更新旧结构
+            IList list = FindAll(t);
             int index = list.Add(obj);
-
-            AddIdIndex(_typeFullName, obj.Id, index);
             UpdateObjects(_typeFullName, list);
 
             MakeIndexByInsert(obj, propertyName, pValue);
@@ -360,11 +364,15 @@ internal class MemoryDB
         // 使用类型级别锁，提高并发性能
         lock (GetTypeLock(t))
         {
-            IList list = FindAll(t);
             obj.Id = GetNextIdAtomic(t); // 使用原子ID生成
+            
+            // 新结构：直接存储到 ID 映射中
+            var typeObjects = _objectsById.GetOrAdd(_typeFullName, _ => new ConcurrentDictionary<long, CacheObject>());
+            typeObjects[obj.Id] = obj;
+            
+            // 兼容性：同时更新旧结构
+            IList list = FindAll(t);
             int index = list.Add(obj);
-
-            AddIdIndex(_typeFullName, obj.Id, index);
             UpdateObjects(_typeFullName, list);
 
             foreach (KeyValuePair<String, Object> kv in dic)
@@ -443,7 +451,6 @@ internal class MemoryDB
             var list = FindAll(t);
             list.Remove(obj);
             UpdateObjects(typeFullName, list);
-            DeleteIdIndex(typeFullName, obj.Id);
         }
 
         // 使用立即异步持久化
@@ -569,68 +576,6 @@ internal class MemoryDB
 
     // 传统索引辅助方法已被类型感知索引替代
 
-
-    //-------------------------- Id Index --------------------------------
-
-    // ID索引存储：使用单独的字典存储ID索引
-    private static readonly ConcurrentDictionary<string, IDictionary> _idIndexes = new();
-
-    private static IDictionary GetIdIndexMap(String key)
-    {
-        return _idIndexes.GetOrAdd(key, _ => new Hashtable());
-    }
-
-    private static void UpdateIdIndexMap(String key, IDictionary map)
-    {
-        _idIndexes[key] = map;
-    }
-
-    private static void ClearIdIndexMap(String key)
-    {
-        _idIndexes.TryRemove(key, out _);
-    }
-
-
-    private static void AddIdIndex(String typeFullName, long oid, int index)
-    {
-        String key = GetIdIndexMapKey(typeFullName);
-        IDictionary indexMap = GetIdIndexMap(key);
-        indexMap[oid] = index;
-        UpdateIdIndexMap(key, indexMap);
-    }
-    private static void DeleteIdIndex(String typeFullName, long oid)
-    {
-
-        String key = GetIdIndexMapKey(typeFullName);
-
-        ClearIdIndexMap(key);
-
-        IList results = objectList[typeFullName] as IList;
-        foreach (CacheObject obj in results)
-        {
-            AddIdIndex(typeFullName, obj.Id, results.IndexOf(obj));
-        }
-
-        IDictionary indexMap = GetIdIndexMap(key);
-        UpdateIdIndexMap(key, indexMap);
-    }
-
-    private static int GetIndex(String typeFullName, long oid)
-    {
-        int result = -1;
-        Object objIndex = GetIdIndexMap(GetIdIndexMapKey(typeFullName))[oid];
-        if (objIndex != null)
-        {
-            result = (int)objIndex;
-        }
-        return result;
-    }
-
-    private static String GetIdIndexMapKey(String typeFullName)
-    {
-        return String.Format("{0}_oid_index", typeFullName);
-    }
-
     //----------------------------------------------------------
 
     private static String GetCachePath(Type t)
@@ -647,7 +592,7 @@ internal class MemoryDB
     {
         _hasCheckedFileDB.Clear();
         objectList.Clear();
-        _idIndexes.Clear();
+        _objectsById.Clear(); // 清理新的ID映射结构
         // 清理类型感知索引
         TypedIndexManager.ClearAllIndexes();
     }
@@ -673,12 +618,17 @@ internal class MemoryDB
             {
                 var list = FindAll(type);
                 var typeFullName = type.FullName;
+                var typeObjects = _objectsById.GetOrAdd(typeFullName, _ => new ConcurrentDictionary<long, CacheObject>());
                 
                 foreach (var obj in typeGroup)
                 {
                     obj.Id = GetNextIdAtomic(type);
+                    
+                    // 新结构：直接存储到 ID 映射中
+                    typeObjects[obj.Id] = obj;
+                    
+                    // 兼容性：同时更新旧结构
                     var index = list.Add(obj);
-                    AddIdIndex(typeFullName, obj.Id, index);
                     MakeIndexByInsert(obj);
                 }
                 
