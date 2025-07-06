@@ -143,14 +143,10 @@ public static class TypedIndexManager
     }
 
     /// <summary>
-    /// 清空所有索引
+    /// 清除所有索引
     /// </summary>
     public static void ClearAllIndexes()
     {
-        foreach (var index in _typedIndexes.Values)
-        {
-            index.Clear();
-        }
         _typedIndexes.Clear();
     }
 

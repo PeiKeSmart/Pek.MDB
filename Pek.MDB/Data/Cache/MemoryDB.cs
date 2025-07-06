@@ -18,9 +18,6 @@ internal class MemoryDB
 {
 
     private static IDictionary objectList = Hashtable.Synchronized([]);
-    // 高效索引结构：使用线程安全的集合
-    private static ConcurrentDictionary<string, ConcurrentHashSet<long>> indexList = new();
-    private static readonly object indexLock = new();
     
     // 类型级别锁 - 提升并发性能
     private static readonly ConcurrentDictionary<Type, object> _typeLocks = new();
@@ -59,27 +56,6 @@ internal class MemoryDB
     {
         return _typeIdCounters.AddOrUpdate(type, 1, (_, current) => current + 1);
     }
-    
-    // 类型感知索引配置
-    private static volatile bool _enableTypedIndex = true;
-
-    /// <summary>
-    /// 启用或禁用类型感知索引（内部管理，自动优化）
-    /// </summary>
-    /// <param name="enable">是否启用</param>
-    internal static void EnableTypedIndex(bool enable)
-    {
-        _enableTypedIndex = enable;
-    }
-
-    /// <summary>
-    /// 检查是否启用了类型感知索引（内部使用）
-    /// </summary>
-    /// <returns>是否启用</returns>
-    internal static bool IsTypedIndexEnabled()
-    {
-        return _enableTypedIndex;
-    }
 
     public static IDictionary GetObjectsMap()
     {
@@ -88,13 +64,8 @@ internal class MemoryDB
 
     public static IDictionary GetIndexMap()
     {
-        // 为了向后兼容，转换为旧格式返回
-        var result = new Hashtable();
-        foreach (var kvp in indexList)
-        {
-            result[kvp.Key] = string.Join(",", kvp.Value);
-        }
-        return result;
+        // 为了向后兼容，返回空字典
+        return new Hashtable();
     }
 
 
@@ -275,17 +246,8 @@ internal class MemoryDB
     {
         var results = new List<object>();
 
-        // 简化：直接使用类型感知索引
-        HashSet<long> idSet;
-        if (_enableTypedIndex)
-        {
-            idSet = TypedIndexManager.FindByValue(t, propertyName, val);
-        }
-        else
-        {
-            // 回退到传统索引
-            idSet = FindLegacyIds(t, propertyName, val);
-        }
+        // 直接使用类型感知索引
+        var idSet = TypedIndexManager.FindByValue(t, propertyName, val);
         
         foreach (var id in idSet)
         {
@@ -470,12 +432,11 @@ internal class MemoryDB
         if (cacheObject == null || pValue == null) return;
         
         var t = cacheObject.GetType();
-        var propertyKey = GetPropertyKey(t.FullName ?? "", propertyName);
-        var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
-        
-        // 使用线程安全的索引操作
-        var hashSet = indexList.GetOrAdd(valueKey, _ => new ConcurrentHashSet<long>());
-        hashSet.Add(cacheObject.Id);
+        var propertyInfo = t.GetProperty(propertyName);
+        if (propertyInfo != null)
+        {
+            TypedIndexManager.AddIndex(t, propertyName, propertyInfo.PropertyType, pValue, cacheObject.Id);
+        }
     }
 
     private static void MakeIndexByInsert(CacheObject cacheObject)
@@ -490,22 +451,8 @@ internal class MemoryDB
             var pValue = rft.GetPropertyValue(cacheObject, p.Name);
             if (pValue == null) continue;
             
-            // 传统字符串索引（保持向后兼容）
-            if (!strUtil.IsNullOrEmpty(pValue.ToString()))
-            {
-                var propertyKey = GetPropertyKey(cacheObject.GetType().FullName ?? "", p.Name);
-                var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
-                
-                // 使用线程安全的索引操作
-                var hashSet = indexList.GetOrAdd(valueKey, _ => new ConcurrentHashSet<long>());
-                hashSet.Add(cacheObject.Id);
-            }
-            
-            // 类型感知索引（新功能）
-            if (_enableTypedIndex)
-            {
-                TypedIndexManager.AddIndex(cacheObject.GetType(), p.Name, p.PropertyType, pValue, cacheObject.Id);
-            }
+            // 只使用类型感知索引
+            TypedIndexManager.AddIndex(cacheObject.GetType(), p.Name, p.PropertyType, pValue, cacheObject.Id);
         }
     }
 
@@ -523,15 +470,17 @@ internal class MemoryDB
         if (cacheObject == null || pValue == null) return;
         
         var t = cacheObject.GetType();
-        var propertyKey = GetPropertyKey(t.FullName ?? "", propertyName);
-        
-        // 先删除旧索引
-        DeleteOldValueIdMapOptimized(propertyKey, cacheObject.Id);
-        
-        // 添加新索引
-        var valueKey = GetValueKey(propertyKey, pValue.ToString() ?? "");
-        var hashSet = indexList.GetOrAdd(valueKey, _ => new ConcurrentHashSet<long>());
-        hashSet.Add(cacheObject.Id);
+        var propertyInfo = t.GetProperty(propertyName);
+        if (propertyInfo != null)
+        {
+            // 先删除旧索引，再添加新索引
+            var oldValue = rft.GetPropertyValue(cacheObject, propertyName);
+            if (oldValue != null)
+            {
+                TypedIndexManager.RemoveIndex(t, propertyName, oldValue, cacheObject.Id);
+            }
+            TypedIndexManager.AddIndex(t, propertyName, propertyInfo.PropertyType, pValue, cacheObject.Id);
+        }
     }
 
     private static void MakeIndexByDelete(CacheObject cacheObject)
@@ -543,52 +492,16 @@ internal class MemoryDB
         
         foreach (var p in properties)
         {
-            // 删除传统字符串索引
-            var propertyKey = GetPropertyKey(cacheObject.GetType().FullName ?? "", p.Name);
-            DeleteOldValueIdMapOptimized(propertyKey, cacheObject.Id);
-            
-            // 删除类型感知索引
-            if (_enableTypedIndex)
+            // 只删除类型感知索引
+            var pValue = rft.GetPropertyValue(cacheObject, p.Name);
+            if (pValue != null)
             {
-                var pValue = rft.GetPropertyValue(cacheObject, p.Name);
-                if (pValue != null)
-                {
-                    TypedIndexManager.RemoveIndex(cacheObject.GetType(), p.Name, pValue, cacheObject.Id);
-                }
+                TypedIndexManager.RemoveIndex(cacheObject.GetType(), p.Name, pValue, cacheObject.Id);
             }
         }
     }
 
-    // 新的优化删除方法 - O(1) 复杂度，线程安全
-    private static void DeleteOldValueIdMapOptimized(String propertyKeyPrefix, long oid)
-    {
-        // 找到所有以该属性为前缀的索引键并删除对应的ID
-        var keysToRemove = new List<string>();
-        
-        lock (indexLock)
-        {
-            foreach (var kvp in indexList.ToList())
-            {
-                if (kvp.Key.StartsWith(propertyKeyPrefix + ":"))
-                {
-                    if (kvp.Value.Contains(oid))
-                    {
-                        kvp.Value.Remove(oid);
-                        if (kvp.Value.Count == 0)
-                        {
-                            keysToRemove.Add(kvp.Key);
-                        }
-                    }
-                }
-            }
-            
-            // 删除空的索引项
-            foreach (var key in keysToRemove)
-            {
-                indexList.TryRemove(key, out _);
-            }
-        }
-    }
+    // 删除传统索引相关的方法，已被类型感知索引替代
 
     private static PropertyInfo[] GetProperties(Type t)
     {
@@ -615,16 +528,7 @@ internal class MemoryDB
         // 这个方法已被优化版本替代，保留空实现用于兼容性
     }
 
-    private static String GetPropertyKey(String typeFullName, String propertyName)
-    {
-        return typeFullName + "_" + propertyName;
-    }
-
-    // 新增：获取具体值的索引键
-    private static String GetValueKey(String propertyKey, String value)
-    {
-        return propertyKey + ":" + value;
-    }
+    // 传统索引辅助方法已被类型感知索引替代
 
 
     //-------------------------- Id Index --------------------------------
@@ -705,161 +609,24 @@ internal class MemoryDB
     {
         _hasCheckedFileDB = new Hashtable();
         objectList = Hashtable.Synchronized(new Hashtable());
-        indexList = new ConcurrentDictionary<string, ConcurrentHashSet<long>>();
-        // 简化：不再需要清理快照
+        // 清理类型感知索引
+        TypedIndexManager.ClearAllIndexes();
     }
 
-    // =================================
-    // 高并发性能监控和优化方法
-    // =================================
-    
-    /// <summary>
-    /// 获取索引统计信息
-    /// </summary>
-    public static Dictionary<string, int> GetIndexStatistics()
-    {
-        var stats = new Dictionary<string, int>();
-        lock (indexLock)
-        {
-            foreach (var kvp in indexList)
-            {
-                stats[kvp.Key] = kvp.Value.Count;
-            }
-        }
-        return stats;
-    }
-    
-    /// <summary>
-    /// 清理空的索引条目
-    /// </summary>
-    public static void CleanupEmptyIndexes()
-    {
-        var keysToRemove = new List<string>();
-        lock (indexLock)
-        {
-            foreach (var kvp in indexList.ToList())
-            {
-                if (kvp.Value.Count == 0)
-                {
-                    keysToRemove.Add(kvp.Key);
-                }
-            }
-            
-            foreach (var key in keysToRemove)
-            {
-                indexList.TryRemove(key, out _);
-            }
-        }
-    }
-    
-    /// <summary>
-    /// 获取索引总数
-    /// </summary>
-    public static int GetIndexCount()
-    {
-        return indexList.Count;
-    }
-    
-    /// <summary>
-    /// 获取索引内存使用估算（字节）
-    /// </summary>
-    public static long GetIndexMemoryUsage()
-    {
-        long totalMemory = 0;
-        lock (indexLock)
-        {
-            foreach (var kvp in indexList)
-            {
-                // 估算：键的字符串长度 * 2 (Unicode) + HashSet的大小估算
-                totalMemory += kvp.Key.Length * 2;
-                totalMemory += kvp.Value.Count * 8; // 每个long占8字节
-                totalMemory += 32; // HashSet的开销估算
-            }
-        }
-        return totalMemory;
-    }
+    // 传统索引相关的方法已被类型感知索引替代
 
     /// <summary>
-    /// 获取索引锁对象
-    /// </summary>
-    /// <returns>索引锁对象</returns>
-    public static object GetIndexLock()
-    {
-        return indexLock;
-    }
-
-    /// <summary>
-    /// 获取索引列表的快照
-    /// </summary>
-    /// <returns>索引列表快照</returns>
-    public static Dictionary<string, HashSet<long>> GetIndexListSnapshot()
-    {
-        return indexList.ToDictionary(
-            kvp => kvp.Key,
-            kvp => kvp.Value.ToHashSet()
-        );
-    }
-
-    /// <summary>
-    /// 直接添加索引项
-    /// </summary>
-    /// <param name="key">索引键</param>
-    /// <param name="id">对象ID</param>
-    public static void AddIndexItem(string key, long id)
-    {
-        var hashSet = indexList.GetOrAdd(key, _ => new ConcurrentHashSet<long>());
-        hashSet.Add(id);
-    }
-
-    /// <summary>
-    /// 直接移除索引项
-    /// </summary>
-    /// <param name="key">索引键</param>
-    /// <param name="id">对象ID</param>
-    public static void RemoveIndexItem(string key, long id)
-    {
-        lock (indexLock)
-        {
-            if (indexList.TryGetValue(key, out var existingSet))
-            {
-                existingSet.Remove(id);
-                if (existingSet.Count == 0)
-                {
-                    indexList.TryRemove(key, out _);
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// 获取索引项
-    /// </summary>
-    /// <param name="key">索引键</param>
-    /// <returns>对象ID集合</returns>
-    public static HashSet<long> GetIndexItems(string key)
-    {
-        if (indexList.TryGetValue(key, out var existingSet))
-        {
-            return existingSet.ToHashSet();
-        }
-        return new HashSet<long>();
-    }
-
-    /// <summary>
-    /// 获取索引统计信息
+    /// 获取索引统计信息 - 基于类型感知索引
     /// </summary>
     /// <returns>索引统计信息</returns>
     public static IndexStats GetIndexStats()
     {
-        lock (indexLock)
+        return new IndexStats
         {
-            return new IndexStats
-            {
-                TotalIndexes = indexList.Count,
-                TotalEntries = indexList.Values.Sum(set => set.Count),
-                MemoryUsage = GetIndexMemoryUsage()
-            };
-        }
+            TotalIndexes = TypedIndexManager.GetIndexCount(),
+            TotalEntries = 0, // 待 TypedIndexManager 实现具体方法
+            MemoryUsage = 0 // 待 TypedIndexManager 实现具体方法
+        };
     }
 
     /// <summary>
@@ -912,7 +679,7 @@ internal class MemoryDB
     }
 
     /// <summary>
-    /// 分页查询 - 性能优化
+    /// 分页查询 - 基于类型感知索引
     /// </summary>
     /// <param name="t">类型</param>
     /// <param name="propertyName">属性名</param>
@@ -922,16 +689,8 @@ internal class MemoryDB
     /// <returns>分页结果</returns>
     internal static IList FindByPaged(Type t, String propertyName, Object val, int pageIndex, int pageSize)
     {
-        HashSet<long> idSet;
-        if (_enableTypedIndex)
-        {
-            idSet = TypedIndexManager.FindByValue(t, propertyName, val);
-        }
-        else
-        {
-            // 回退到传统索引
-            idSet = FindLegacyIds(t, propertyName, val);
-        }
+        // 使用类型感知索引查询
+        var idSet = TypedIndexManager.FindByValue(t, propertyName, val);
         
         var pagedIds = idSet.Skip(pageIndex * pageSize).Take(pageSize);
         
@@ -944,17 +703,6 @@ internal class MemoryDB
         return results;
     }
 
-    /// <summary>
-    /// 传统索引查询方法（从 UnifiedIndexManager 迁移）
-    /// </summary>
-    private static HashSet<long> FindLegacyIds(Type type, string propertyName, object value)
-    {
-        if (value == null) return new HashSet<long>();
-
-        var propertyKey = GetPropertyKey(type.FullName!, propertyName);
-        var valueKey = GetValueKey(propertyKey, value.ToString()!);
-
-        return GetIndexItems(valueKey);
-    }
+    // 传统索引查询方法已被类型感知索引替代
 
 }
