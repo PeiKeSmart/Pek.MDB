@@ -3,16 +3,16 @@ using System.Collections.Concurrent;
 namespace DH.Data.Cache.TypedIndex;
 
 /// <summary>
-/// 日期时间类型索引 - 支持时间范围查询
+/// 日期时间类型索引 - 支持时间范围查询（线程安全优化版）
 /// </summary>
 public class DateTimeIndex : TypedIndexBase
 {
-    // 使用有序字典来支持范围查询
-    private readonly SortedDictionary<DateTime, HashSet<long>> _sortedIndex = new();
-    private readonly ConcurrentDictionary<string, HashSet<long>> _yearIndex = new();
-    private readonly ConcurrentDictionary<string, HashSet<long>> _monthIndex = new();
-    private readonly ConcurrentDictionary<string, HashSet<long>> _dayIndex = new();
-    private readonly object _sortedLock = new();
+    // 使用有序字典来支持范围查询 - 读写锁优化
+    private readonly SortedDictionary<DateTime, ConcurrentHashSet<long>> _sortedIndex = new();
+    private readonly ConcurrentDictionary<string, ConcurrentHashSet<long>> _yearIndex = new();
+    private readonly ConcurrentDictionary<string, ConcurrentHashSet<long>> _monthIndex = new();
+    private readonly ConcurrentDictionary<string, ConcurrentHashSet<long>> _dayIndex = new();
+    private readonly ReaderWriterLockSlim _sortedLock = new(LockRecursionPolicy.NoRecursion);
 
     public override void AddId(object value, long id)
     {
@@ -26,25 +26,36 @@ public class DateTimeIndex : TypedIndexBase
         // 添加到基础索引
         base.AddId(dt, id);
 
-        // 添加到有序索引
-        lock (_sortedLock)
+        // 添加到有序索引 - 使用写锁
+        _sortedLock.EnterWriteLock();
+        try
         {
             if (!_sortedIndex.TryGetValue(dt, out var idSet))
             {
-                idSet = new HashSet<long>();
+                idSet = new ConcurrentHashSet<long>();
                 _sortedIndex[dt] = idSet;
             }
             idSet.Add(id);
         }
+        finally
+        {
+            _sortedLock.ExitWriteLock();
+        }
 
-        // 添加到时间分组索引
+        // 添加到时间分组索引 - 使用线程安全集合
         var year = dt.Year.ToString();
         var month = $"{dt.Year}-{dt.Month:00}";
         var day = $"{dt.Year}-{dt.Month:00}-{dt.Day:00}";
 
-        _yearIndex.AddOrUpdate(year, new HashSet<long> { id }, (key, set) => { set.Add(id); return set; });
-        _monthIndex.AddOrUpdate(month, new HashSet<long> { id }, (key, set) => { set.Add(id); return set; });
-        _dayIndex.AddOrUpdate(day, new HashSet<long> { id }, (key, set) => { set.Add(id); return set; });
+        _yearIndex.AddOrUpdate(year, 
+            new ConcurrentHashSet<long> { id }, 
+            (key, set) => { set.Add(id); return set; });
+        _monthIndex.AddOrUpdate(month, 
+            new ConcurrentHashSet<long> { id }, 
+            (key, set) => { set.Add(id); return set; });
+        _dayIndex.AddOrUpdate(day, 
+            new ConcurrentHashSet<long> { id }, 
+            (key, set) => { set.Add(id); return set; });
     }
 
     public override void RemoveId(object value, long id)
@@ -59,8 +70,9 @@ public class DateTimeIndex : TypedIndexBase
         // 从基础索引移除
         base.RemoveId(dt, id);
 
-        // 从有序索引移除
-        lock (_sortedLock)
+        // 从有序索引移除 - 使用写锁
+        _sortedLock.EnterWriteLock();
+        try
         {
             if (_sortedIndex.TryGetValue(dt, out var idSet))
             {
@@ -70,6 +82,10 @@ public class DateTimeIndex : TypedIndexBase
                     _sortedIndex.Remove(dt);
                 }
             }
+        }
+        finally
+        {
+            _sortedLock.ExitWriteLock();
         }
 
         // 从时间分组索引移除
@@ -96,16 +112,24 @@ public class DateTimeIndex : TypedIndexBase
         _lastAccessed = DateTime.Now;
 
         var result = new HashSet<long>();
-        lock (_sortedLock)
+        
+        // 使用读锁进行范围查询
+        _sortedLock.EnterReadLock();
+        try
         {
             var range = _sortedIndex.Where(kvp => kvp.Key >= minValue && kvp.Key <= maxValue);
             foreach (var kvp in range)
             {
-                foreach (var id in kvp.Value)
+                // 获取线程安全集合的快照
+                foreach (var id in kvp.Value.ToHashSet())
                 {
                     result.Add(id);
                 }
             }
+        }
+        finally
+        {
+            _sortedLock.ExitReadLock();
         }
 
         if (result.Count > 0)
@@ -198,16 +222,21 @@ public class DateTimeIndex : TypedIndexBase
     public override void Clear()
     {
         base.Clear();
-        lock (_sortedLock)
+        _sortedLock.EnterWriteLock();
+        try
         {
             _sortedIndex.Clear();
+        }
+        finally
+        {
+            _sortedLock.ExitWriteLock();
         }
         _yearIndex.Clear();
         _monthIndex.Clear();
         _dayIndex.Clear();
     }
 
-    private void RemoveFromTimeIndex(ConcurrentDictionary<string, HashSet<long>> index, string key, long id)
+    private void RemoveFromTimeIndex(ConcurrentDictionary<string, ConcurrentHashSet<long>> index, string key, long id)
     {
         if (index.TryGetValue(key, out var idSet))
         {

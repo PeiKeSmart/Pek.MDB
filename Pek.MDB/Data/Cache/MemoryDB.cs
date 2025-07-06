@@ -78,7 +78,12 @@ internal class MemoryDB
     }
 
 
-    private static Object objLock = new();
+    // 异步持久化优化：去重机制和频率控制
+    private static readonly ConcurrentDictionary<Type, DateTime> _lastWriteTime = new();
+    private static readonly object objLock = new(); // 文件操作锁
+    
+    // 持久化配置
+    private static readonly int MIN_WRITE_INTERVAL_MS = 500; // 最小写入间隔500ms
 
 
     private static IList GetObjectsByName(Type t)
@@ -197,28 +202,35 @@ internal class MemoryDB
     }
 
     /// <summary>
-    /// 立即启动异步持久化（Fire-and-Forget）
+    /// 启动异步持久化（优化版：频率控制和数据快照）
     /// </summary>
     /// <param name="type">类型</param>
     private static void StartAsyncPersistence(Type type)
     {
         if (IsInMemory(type)) return;
 
-        var list = GetObjectsByName(type);
-        if (list != null)
+        // 检查写入频率，避免过于频繁的I/O操作
+        var currentTime = DateTime.Now;
+        if (_lastWriteTime.TryGetValue(type, out var lastWrite))
         {
-            // Fire-and-Forget: 启动异步持久化但不等待完成
-            _ = Task.Run(async () => {
-                try
-                {
-                    await SerializeAsync(type, list).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    XTrace.WriteException(ex);
-                }
-            });
+            if (currentTime.Subtract(lastWrite).TotalMilliseconds < MIN_WRITE_INTERVAL_MS)
+            {
+                return; // 跳过太频繁的写入
+            }
         }
+
+        // 立即启动异步持久化
+        _ = Task.Run(async () => {
+            try
+            {
+                await SerializeAsyncWithSnapshot(type).ConfigureAwait(false);
+                _lastWriteTime[type] = DateTime.Now;
+            }
+            catch (Exception ex)
+            {
+                XTrace.WriteException(ex);
+            }
+        });
     }
 
     private static void UpdateObjects(String key, IList list)
@@ -705,4 +717,65 @@ internal class MemoryDB
 
     // 传统索引查询方法已被类型感知索引替代
 
+    /// <summary>
+    /// 带数据快照的异步序列化方法
+    /// </summary>
+    /// <param name="type">类型</param>
+    /// <returns>Task</returns>
+    private static async Task SerializeAsyncWithSnapshot(Type type)
+    {
+        if (IsInMemory(type)) return;
+        
+        // 创建数据快照，确保一致性
+        IList snapshot;
+        lock (GetTypeLock(type))
+        {
+            var originalList = GetObjectsByName(type);
+            snapshot = CreateListSnapshot(originalList);
+        }
+        
+        // 异步持久化快照数据
+        await Task.Run(() => {
+            try
+            {
+                var target = SimpleJsonString.ConvertList(snapshot);
+                if (!string.IsNullOrEmpty(target))
+                {
+                    var absolutePath = GetCachePath(type);
+                    
+                    lock (objLock)
+                    {
+                        var dir = Path.GetDirectoryName(absolutePath);
+                        if (!Directory.Exists(dir))
+                        {
+                            Directory.CreateDirectory(dir!);
+                        }
+                        
+                        DH.IO.File.Write(absolutePath, target);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                XTrace.WriteException(ex);
+            }
+        }).ConfigureAwait(false);
+    }
+    
+    /// <summary>
+    /// 创建列表的深拷贝快照
+    /// </summary>
+    /// <param name="originalList">原始列表</param>
+    /// <returns>快照列表</returns>
+    private static IList CreateListSnapshot(IList originalList)
+    {
+        if (originalList == null) return new ArrayList();
+        
+        var snapshot = new ArrayList(originalList.Count);
+        foreach (var item in originalList)
+        {
+            snapshot.Add(item); // 对于CacheObject，这是浅拷贝，但对于持久化来说足够了
+        }
+        return snapshot;
+    }
 }

@@ -4,13 +4,13 @@ using System.Globalization;
 namespace DH.Data.Cache.TypedIndex;
 
 /// <summary>
-/// 数值类型索引 - 支持范围查询
+/// 数值类型索引 - 支持范围查询（线程安全优化版）
 /// </summary>
 public class NumericIndex : TypedIndexBase
 {
-    // 使用有序字典来支持范围查询
-    private readonly SortedDictionary<decimal, HashSet<long>> _sortedIndex = new();
-    private readonly object _sortedLock = new();
+    // 使用并发有序字典来支持范围查询 - 使用读写锁优化
+    private readonly SortedDictionary<decimal, ConcurrentHashSet<long>> _sortedIndex = new();
+    private readonly ReaderWriterLockSlim _sortedLock = new(LockRecursionPolicy.NoRecursion);
 
     public override void AddId(object value, long id)
     {
@@ -22,15 +22,20 @@ public class NumericIndex : TypedIndexBase
         // 添加到基础索引
         base.AddId(numericValue, id);
 
-        // 添加到有序索引
-        lock (_sortedLock)
+        // 添加到有序索引 - 使用写锁
+        _sortedLock.EnterWriteLock();
+        try
         {
             if (!_sortedIndex.TryGetValue(numericValue.Value, out var idSet))
             {
-                idSet = new HashSet<long>();
+                idSet = new ConcurrentHashSet<long>();
                 _sortedIndex[numericValue.Value] = idSet;
             }
             idSet.Add(id);
+        }
+        finally
+        {
+            _sortedLock.ExitWriteLock();
         }
     }
 
@@ -44,8 +49,9 @@ public class NumericIndex : TypedIndexBase
         // 从基础索引移除
         base.RemoveId(numericValue, id);
 
-        // 从有序索引移除
-        lock (_sortedLock)
+        // 从有序索引移除 - 使用写锁
+        _sortedLock.EnterWriteLock();
+        try
         {
             if (_sortedIndex.TryGetValue(numericValue.Value, out var idSet))
             {
@@ -55,6 +61,10 @@ public class NumericIndex : TypedIndexBase
                     _sortedIndex.Remove(numericValue.Value);
                 }
             }
+        }
+        finally
+        {
+            _sortedLock.ExitWriteLock();
         }
     }
 
@@ -72,16 +82,24 @@ public class NumericIndex : TypedIndexBase
         _lastAccessed = DateTime.Now;
 
         var result = new HashSet<long>();
-        lock (_sortedLock)
+        
+        // 使用读锁进行范围查询
+        _sortedLock.EnterReadLock();
+        try
         {
             var range = _sortedIndex.Where(kvp => kvp.Key >= minValue && kvp.Key <= maxValue);
             foreach (var kvp in range)
             {
-                foreach (var id in kvp.Value)
+                // 获取线程安全集合的快照
+                foreach (var id in kvp.Value.ToHashSet())
                 {
                     result.Add(id);
                 }
             }
+        }
+        finally
+        {
+            _sortedLock.ExitReadLock();
         }
 
         if (result.Count > 0)
@@ -101,9 +119,14 @@ public class NumericIndex : TypedIndexBase
     public override void Clear()
     {
         base.Clear();
-        lock (_sortedLock)
+        _sortedLock.EnterWriteLock();
+        try
         {
             _sortedIndex.Clear();
+        }
+        finally
+        {
+            _sortedLock.ExitWriteLock();
         }
     }
 
