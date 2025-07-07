@@ -232,14 +232,28 @@ public class cdb
     }
 
     /// <summary>
-    /// 分页查询
+    /// 分页查询 - 现代化分页API，推荐使用
     /// </summary>
     /// <typeparam name="T"></typeparam>
-    /// <param name="propertyName">排序属性名称</param>
+    /// <param name="propertyName">排序属性名称（可选）</param>
     /// <param name="pageIndex">页索引（从0开始）</param>
     /// <param name="pageSize">页大小</param>
     /// <param name="ascending">是否升序</param>
-    /// <returns>分页结果</returns>
+    /// <returns>分页结果，包含数据和分页信息</returns>
+    /// <example>
+    /// // 基本分页：获取第一页的20条用户数据
+    /// var users = cdb.FindByPage&lt;User&gt;(pageIndex: 0, pageSize: 20);
+    /// 
+    /// // 带排序的分页：按创建时间倒序分页
+    /// var recentUsers = cdb.FindByPage&lt;User&gt;("CreateTime", 0, 50, false);
+    /// 
+    /// // 客户端LINQ分页（适合复杂查询）：
+    /// var activeUsers = cdb.FindBy&lt;User&gt;("Status", "Active")
+    ///     .Where(u => u.CreateTime > DateTime.Today.AddDays(-30))
+    ///     .Skip(pageIndex * pageSize)
+    ///     .Take(pageSize)
+    ///     .ToList();
+    /// </example>
     public static PagedResult<T> FindByPage<T>(String? propertyName = null, int pageIndex = 0, int pageSize = 10, bool ascending = true) where T : CacheObject
     {
         var type = typeof(T);

@@ -655,33 +655,6 @@ internal class MemoryDB
     }
 
     /// <summary>
-    /// 分页查询 - 基于类型感知索引
-    /// </summary>
-    /// <param name="t">类型</param>
-    /// <param name="propertyName">属性名</param>
-    /// <param name="val">查询值</param>
-    /// <param name="pageIndex">页索引</param>
-    /// <param name="pageSize">页大小</param>
-    /// <returns>分页结果</returns>
-    internal static IList FindByPaged(Type t, String propertyName, Object val, int pageIndex, int pageSize)
-    {
-        // 使用类型感知索引查询
-        var idSet = TypedIndexManager.FindByValue(t, propertyName, val);
-        
-        var pagedIds = idSet.Skip(pageIndex * pageSize).Take(pageSize);
-        
-        var results = new ArrayList();
-        foreach (var id in pagedIds)
-        {
-            var obj = FindById(t, id);
-            if (obj != null) results.Add(obj);
-        }
-        return results;
-    }
-
-    // 传统索引查询方法已被类型感知索引替代
-
-    /// <summary>
     /// 带数据快照的异步序列化方法
     /// </summary>
     /// <param name="type">类型</param>
