@@ -1,4 +1,6 @@
 ﻿using System.Collections;
+
+using DH.Data.Cache;
 using DH.Data.Cache.TypedIndex;
 
 namespace DH;
