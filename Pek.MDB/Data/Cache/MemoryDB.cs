@@ -145,7 +145,20 @@ internal class MemoryDB
             {
                 // 直接存储到新的ID映射结构
                 typeObjects[obj.Id] = obj;
+                
+                // 建立普通索引
                 MakeIndexByInsert(obj);
+                
+                // 建立唯一约束索引（加载时不需要验证，直接建立索引）
+                try
+                {
+                    UniqueConstraintManager.AddUniqueConstraints(obj);
+                }
+                catch (UniqueConstraintViolationException ex)
+                {
+                    // 数据文件中存在重复的唯一值，记录警告但继续加载
+                    XTrace.WriteLine($"加载数据时发现唯一约束冲突，已跳过对象 ID: {obj.Id}, 错误: {ex.Message}");
+                }
             }
         }
     }
@@ -300,14 +313,21 @@ internal class MemoryDB
         // 使用类型级别锁，提高并发性能
         lock (GetTypeLock(t))
         {
-            // 生成新的 ID
+            // 1. 验证唯一约束（在分配ID之前）
+            UniqueConstraintManager.ValidateAllUniqueConstraints(obj);
+            
+            // 2. 生成新的 ID
             obj.Id = GetNextIdAtomic(t);
             
-            // 直接存储到优化的 ID 映射结构中
+            // 3. 直接存储到优化的 ID 映射结构中
             var typeObjects = _objectsById.GetOrAdd(typeFullName, _ => new ConcurrentDictionary<long, CacheObject>());
             typeObjects[obj.Id] = obj;
 
+            // 4. 建立普通索引
             MakeIndexByInsert(obj);
+            
+            // 5. 建立唯一约束索引
+            UniqueConstraintManager.AddUniqueConstraints(obj);
         }
 
         // 持久化在锁外异步执行，避免阻塞
@@ -370,10 +390,28 @@ internal class MemoryDB
 
     internal static Result Update(CacheObject obj)
     {
-
         Type t = obj.GetType();
 
-        MakeIndexByUpdate(obj);
+        // 使用类型级别锁，确保更新操作的原子性
+        lock (GetTypeLock(t))
+        {
+            // 1. 获取旧对象用于唯一约束更新
+            var oldObj = FindById(t, obj.Id);
+            if (oldObj == null)
+            {
+                throw new InvalidOperationException($"要更新的对象（ID: {obj.Id}）不存在");
+            }
+
+            // 2. 更新唯一约束索引（先验证再更新）
+            UniqueConstraintManager.UpdateUniqueConstraints(oldObj, obj);
+            
+            // 3. 更新普通索引
+            MakeIndexByUpdate(obj);
+            
+            // 4. 更新主存储中的对象
+            var typeObjects = _objectsById.GetOrAdd(t.FullName, _ => new ConcurrentDictionary<long, CacheObject>());
+            typeObjects[obj.Id] = obj;
+        }
 
         if (IsInMemory(t)) return new Result();
 
@@ -385,7 +423,6 @@ internal class MemoryDB
         catch (Exception ex)
         {
             XTrace.WriteException(ex);
-
             throw;
         }
     }
@@ -421,9 +458,13 @@ internal class MemoryDB
         // 使用类型级别锁，确保并发安全
         lock (GetTypeLock(t))
         {
+            // 1. 移除唯一约束索引
+            UniqueConstraintManager.RemoveUniqueConstraints(obj);
+            
+            // 2. 移除普通索引
             MakeIndexByDelete(obj);
 
-            // 新优化结构：直接从 ID 映射中删除，O(1) 复杂度
+            // 3. 从主存储中删除对象，O(1) 复杂度
             var typeObjects = _objectsById.GetOrAdd(typeFullName, _ => new ConcurrentDictionary<long, CacheObject>());
             typeObjects.TryRemove(obj.Id, out _);
         }
@@ -567,7 +608,7 @@ internal class MemoryDB
     // 传统索引相关的方法已被类型感知索引替代
 
     /// <summary>
-    /// 批量插入对象 - 性能优化
+    /// 批量插入对象 - 性能优化，支持唯一约束验证
     /// </summary>
     /// <param name="objects">要插入的对象集合</param>
     internal static void InsertBatch(IEnumerable<CacheObject> objects)
@@ -588,13 +629,20 @@ internal class MemoryDB
                 
                 foreach (var obj in typeGroup)
                 {
+                    // 1. 验证唯一约束
+                    UniqueConstraintManager.ValidateAllUniqueConstraints(obj);
+                    
+                    // 2. 生成ID
                     obj.Id = GetNextIdAtomic(type);
                     
-                    // 新结构：直接存储到 ID 映射中
+                    // 3. 存储到主结构
                     typeObjects[obj.Id] = obj;
                     
-                    // 建立索引
+                    // 4. 建立普通索引
                     MakeIndexByInsert(obj);
+                    
+                    // 5. 建立唯一约束索引
+                    UniqueConstraintManager.AddUniqueConstraints(obj);
                 }
             }
             

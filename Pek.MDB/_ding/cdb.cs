@@ -272,15 +272,97 @@ public class cdb
         };
     }
 
-    // API 简化说明：
-    // - 移除了 FindByName: 使用 FindBy<T>("Name", name) 替代
-    // - 移除了 FindByNumericRange: 使用 FindByRange<T>(propertyName, min, max) 替代  
-    // - 移除了 FindByDateRange: 使用 FindByRange<T>(propertyName, startDate, endDate) 替代
-    // - 移除了 FindByContains: 使用 FindByLike<T>(propertyName, "*text*") 替代
-    // - 移除了 FindByStartsWith: 使用 FindByLike<T>(propertyName, "text*") 替代
-    // - 移除了 FindByEndsWith: 使用 FindByLike<T>(propertyName, "*text") 替代
-    // 
-    // 保留的核心API可以满足所有查询需求，代码更加简洁一致
+    /// <summary>
+    /// 根据唯一字段值查找对象
+    /// </summary>
+    /// <typeparam name="T">对象类型</typeparam>
+    /// <param name="propertyName">唯一字段名称</param>
+    /// <param name="value">要查找的值</param>
+    /// <returns>找到的对象，如果不存在返回null</returns>
+    public static T? FindByUnique<T>(String propertyName, Object value) where T : CacheObject
+    {
+        var type = typeof(T);
+        var objectId = UniqueConstraintManager.FindByUniqueValue(type, propertyName, value);
+        
+        if (objectId.HasValue)
+        {
+            return MemoryDB.FindById(type, objectId.Value) as T;
+        }
+        
+        return null;
+    }
+
+    /// <summary>
+    /// 根据复合唯一约束查找对象
+    /// </summary>
+    /// <typeparam name="T">对象类型</typeparam>
+    /// <param name="groupName">约束组名</param>
+    /// <param name="fieldValues">字段值字典</param>
+    /// <returns>找到的对象，如果不存在返回null</returns>
+    public static T? FindByCompositeUnique<T>(String groupName, Dictionary<String, Object> fieldValues) where T : CacheObject
+    {
+        if (fieldValues == null || fieldValues.Count == 0)
+            return null;
+        
+        var type = typeof(T);
+        
+        // 构建复合键
+        var keyParts = new List<string>();
+        foreach (var kvp in fieldValues.OrderBy(x => x.Key)) // 按键名排序确保一致性
+        {
+            keyParts.Add(kvp.Value?.ToString() ?? "NULL");
+        }
+        var compositeKey = string.Join("|", keyParts);
+        
+        var objectId = UniqueConstraintManager.FindByCompositeUniqueValue(type, groupName, compositeKey);
+        
+        if (objectId.HasValue)
+        {
+            return MemoryDB.FindById(type, objectId.Value) as T;
+        }
+        
+        return null;
+    }
+
+    /// <summary>
+    /// 检查唯一字段值是否已存在
+    /// </summary>
+    /// <typeparam name="T">对象类型</typeparam>
+    /// <param name="propertyName">唯一字段名称</param>
+    /// <param name="value">要检查的值</param>
+    /// <param name="excludeId">排除的对象ID（用于更新时检查）</param>
+    /// <returns>如果值已存在返回true，否则返回false</returns>
+    public static bool IsUniqueValueExists<T>(String propertyName, Object value, long? excludeId = null) where T : CacheObject
+    {
+        var type = typeof(T);
+        var existingId = UniqueConstraintManager.FindByUniqueValue(type, propertyName, value);
+        
+        if (!existingId.HasValue)
+            return false;
+        
+        return !excludeId.HasValue || existingId.Value != excludeId.Value;
+    }
+
+    /// <summary>
+    /// 批量插入对象（支持唯一约束验证）
+    /// </summary>
+    /// <typeparam name="T">对象类型</typeparam>
+    /// <param name="objects">要插入的对象集合</param>
+    public static void InsertBatch<T>(IEnumerable<T> objects) where T : CacheObject
+    {
+        if (objects == null) return;
+        
+        MemoryDB.InsertBatch(objects.Cast<CacheObject>());
+    }
+
+    /// <summary>
+    /// 获取唯一约束统计信息
+    /// </summary>
+    /// <returns>统计信息元组</returns>
+    public static (int SingleFieldConstraints, int CompositeFieldConstraints) GetUniqueConstraintStatistics()
+    {
+        return UniqueConstraintManager.GetStatistics();
+    }
 }
 
 /// <summary>
