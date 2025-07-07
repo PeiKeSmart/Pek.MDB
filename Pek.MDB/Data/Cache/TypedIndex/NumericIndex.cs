@@ -1,16 +1,15 @@
 using System.Collections.Concurrent;
-using System.Globalization;
 
 namespace DH.Data.Cache.TypedIndex;
 
 /// <summary>
-/// 数值类型索引 - 支持范围查询（线程安全优化版）
+/// 数值类型索引 - 简化版，支持范围查询（无锁并发优化）
+/// 优化说明：移除了复杂的读写锁机制，使用ConcurrentDictionary实现更好的并发性能
 /// </summary>
 public class NumericIndex : TypedIndexBase
 {
-    // 使用并发有序字典来支持范围查询 - 使用读写锁优化
-    private readonly SortedDictionary<decimal, ConcurrentHashSet<long>> _sortedIndex = new();
-    private readonly ReaderWriterLockSlim _sortedLock = new(LockRecursionPolicy.NoRecursion);
+    // 使用并发字典实现无锁操作，范围查询通过遍历实现
+    private readonly ConcurrentDictionary<decimal, ConcurrentHashSet<long>> _numericIndex = new();
 
     public override void AddId(object value, long id)
     {
@@ -22,21 +21,14 @@ public class NumericIndex : TypedIndexBase
         // 添加到基础索引
         base.AddId(numericValue, id);
 
-        // 添加到有序索引 - 使用写锁
-        _sortedLock.EnterWriteLock();
-        try
-        {
-            if (!_sortedIndex.TryGetValue(numericValue.Value, out var idSet))
+        // 添加到数值索引 - 无锁操作
+        _numericIndex.AddOrUpdate(numericValue.Value,
+            new ConcurrentHashSet<long> { id },
+            (key, existingSet) =>
             {
-                idSet = new ConcurrentHashSet<long>();
-                _sortedIndex[numericValue.Value] = idSet;
-            }
-            idSet.Add(id);
-        }
-        finally
-        {
-            _sortedLock.ExitWriteLock();
-        }
+                existingSet.Add(id);
+                return existingSet;
+            });
     }
 
     public override void RemoveId(object value, long id)
@@ -49,22 +41,14 @@ public class NumericIndex : TypedIndexBase
         // 从基础索引移除
         base.RemoveId(numericValue, id);
 
-        // 从有序索引移除 - 使用写锁
-        _sortedLock.EnterWriteLock();
-        try
+        // 从数值索引移除 - 无锁操作
+        if (_numericIndex.TryGetValue(numericValue.Value, out var idSet))
         {
-            if (_sortedIndex.TryGetValue(numericValue.Value, out var idSet))
+            idSet.Remove(id);
+            if (idSet.Count == 0)
             {
-                idSet.Remove(id);
-                if (idSet.Count == 0)
-                {
-                    _sortedIndex.Remove(numericValue.Value);
-                }
+                _numericIndex.TryRemove(numericValue.Value, out _);
             }
-        }
-        finally
-        {
-            _sortedLock.ExitWriteLock();
         }
     }
 
@@ -83,12 +67,10 @@ public class NumericIndex : TypedIndexBase
 
         var result = new HashSet<long>();
         
-        // 使用读锁进行范围查询
-        _sortedLock.EnterReadLock();
-        try
+        // 无锁范围查询 - 通过遍历实现
+        foreach (var kvp in _numericIndex)
         {
-            var range = _sortedIndex.Where(kvp => kvp.Key >= minValue && kvp.Key <= maxValue);
-            foreach (var kvp in range)
+            if (kvp.Key >= minValue && kvp.Key <= maxValue)
             {
                 // 获取线程安全集合的快照
                 foreach (var id in kvp.Value.ToHashSet())
@@ -96,10 +78,6 @@ public class NumericIndex : TypedIndexBase
                     result.Add(id);
                 }
             }
-        }
-        finally
-        {
-            _sortedLock.ExitReadLock();
         }
 
         if (result.Count > 0)
@@ -119,15 +97,7 @@ public class NumericIndex : TypedIndexBase
     public override void Clear()
     {
         base.Clear();
-        _sortedLock.EnterWriteLock();
-        try
-        {
-            _sortedIndex.Clear();
-        }
-        finally
-        {
-            _sortedLock.ExitWriteLock();
-        }
+        _numericIndex.Clear();
     }
 
     private decimal? ConvertToDecimal(object value)
@@ -158,7 +128,7 @@ public class NumericIndex : TypedIndexBase
     protected override long EstimateMemoryUsage()
     {
         var baseSize = base.EstimateMemoryUsage();
-        var sortedSize = _sortedIndex.Count * (sizeof(decimal) + sizeof(long) * 2); // 估算有序字典额外开销
-        return baseSize + sortedSize;
+        var numericSize = _numericIndex.Count * (sizeof(decimal) + sizeof(long) * 2); // 估算并发字典开销
+        return baseSize + numericSize;
     }
 }

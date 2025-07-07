@@ -208,6 +208,10 @@ var usersByName = cdb.FindBy<User>("Name", "张三");
 var userByUsername = cdb.FindByUnique<User>("Username", "zhangsan"); // 唯一查找 O(1)
 var recentUsers = cdb.FindByRange<User>("CreateTime", DateTime.Today, DateTime.Now);
 
+// 🆕 分页查询 - 推荐使用
+var userPage = cdb.FindByPage<User>("CreateTime", pageIndex: 0, pageSize: 20, ascending: false);
+Console.WriteLine($"总共 {userPage.TotalCount} 条记录，当前页 {userPage.Items.Count} 条");
+
 // 更新数据 - 自动验证唯一性
 user.Email = "newemail@example.com";
 cdb.Update(user);
@@ -233,6 +237,17 @@ cdb.InsertBatch(users);
 
 // 模糊查询
 var matchedUsers = cdb.FindByLike<User>("Name", "张*");
+
+// 🆕 多种分页方式
+// 1. 服务端分页（推荐） - 内置排序和分页逻辑
+var pagedResult = cdb.FindByPage<User>("CreateTime", 0, 50, false);
+
+// 2. 客户端LINQ分页（适合复杂查询）
+var activeUsers = cdb.FindBy<User>("Status", "Active")
+    .Where(u => u.CreateTime > DateTime.Today.AddDays(-30))
+    .Skip(pageIndex * pageSize)
+    .Take(pageSize)
+    .ToList();
 
 // 检查唯一性
 bool exists = cdb.IsUniqueValueExists<User>("Username", "testuser");
@@ -302,7 +317,7 @@ catch (UniqueConstraintViolationException ex)
 ### 扩展功能
 - `FindAll<T>()` - 获取所有数据
 - `FindByMultiple<T>(Dictionary<string, object> conditions)` - 多条件查询
-- `FindByPage<T>(string propertyName, int pageIndex, int pageSize)` - 分页查询
+- `FindByPage<T>(string propertyName, int pageIndex, int pageSize, bool ascending)` - 现代化分页查询 🆕
 
 ## 🛠️ 架构设计
 
@@ -357,6 +372,7 @@ UniqueConstraintManager
 - ❌ **复杂监控**: GetIndexStats → 轻量化
 - ❌ **复杂索引**: StringIndex多重索引 → 精确+模糊
 - ❌ **间接映射**: 复杂ID索引 → O(1)直接映射
+- ❌ **过时分页API**: FindByPaged() → FindByPage<T>() 🆕
 
 ### ✅ 保留的核心优势
 - ✅ **异步持久化机制**: 性能收益明显，风险可控
@@ -364,6 +380,7 @@ UniqueConstraintManager
 - ✅ **精细化锁控制**: 并发性能优秀
 - ✅ **自动索引维护**: 用户体验优秀
 - ✅ **批量操作支持**: 特定场景下价值巨大
+- ✅ **现代化分页**: 类型安全的分页API，支持排序和完整分页信息 🆕
 
 ## 🚀 版本历史
 
